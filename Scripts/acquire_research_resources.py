@@ -26,10 +26,13 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from public_resources import contained, digest, write_json
 
-ROOT = Path(__file__).resolve().parents[1]
+CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CODE_ROOT / 'src'))
+from datahunter.workspace import workspace_root
+ROOT = workspace_root(default=CODE_ROOT)
 MANIFEST = ROOT / 'configs/research_resources.json'
 LOCK = ROOT / 'configs/research_resources.lock.json'
-BASE = ROOT / 'data/raw/public_reference_collection/acquisitions/paper_followup_2026-10-30'
+BASE = ROOT / 'data/acquisitions'
 
 
 def now():
@@ -93,7 +96,7 @@ def transfer_license_preflight(item, locked, reviews=None, registry=None):
     """
     if registry is None:
         import sys
-        sys.path.insert(0, str(ROOT / 'src'))
+        sys.path.insert(0, str(CODE_ROOT / 'src'))
         from datahunter.data_rights import LicenseRegistry
         registry = LicenseRegistry(ROOT / 'configs/data_licenses.json', ROOT / 'configs/data_license_assets.json', root=ROOT)
     old = locked.get(item['id'])
@@ -274,7 +277,7 @@ def acquire(item, locked, base=BASE, *, execute=False, journal=None, license_con
         registry = None
         if license_context:
             import sys
-            sys.path.insert(0, str(ROOT/'src'))
+            sys.path.insert(0, str(CODE_ROOT/'src'))
             from datahunter.data_rights import LicenseRegistry
             registry = LicenseRegistry(ROOT/'configs/data_licenses.json',ROOT/'configs/data_license_assets.json',root=ROOT,**license_context)
         rights = transfer_license_preflight(item, locked, registry=registry)
@@ -331,7 +334,7 @@ def main():
     results, events = {}, []
     BASE.mkdir(parents=True, exist_ok=True)
     # Content-addressed local snapshots preserve exact acquisition instructions/code.
-    for source in (MANIFEST, Path(__file__), ROOT / 'Scripts/public_resources.py',
+    for source in (MANIFEST, Path(__file__), CODE_ROOT / 'Scripts/public_resources.py',
                    ROOT / 'configs/resource_scope.json',
                    ROOT / 'configs/dataset_download_reviews.json',
                    ROOT / 'configs/dataset_metadata_evidence.json'):
@@ -346,7 +349,7 @@ def main():
         event = {'at': now(), 'kind': kind, 'details': details,
                  'manifest_sha256': digest(MANIFEST), 'script_sha256': digest(Path(__file__)),
                  'download_review_sha256': digest(ROOT / 'configs/dataset_download_reviews.json'),
-                 'common_code_sha256': digest(ROOT / 'Scripts/public_resources.py')}
+                 'common_code_sha256': digest(CODE_ROOT / 'Scripts/public_resources.py')}
         with journal_lock:
             with (BASE / 'operations.jsonl').open('a') as stream:
                 stream.write(json.dumps(event, sort_keys=True) + '\n')

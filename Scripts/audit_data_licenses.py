@@ -12,8 +12,10 @@ import subprocess
 import sys
 from urllib.parse import urlsplit
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'src'))
+CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CODE_ROOT / 'src'))
+from datahunter.workspace import workspace_root
+ROOT = workspace_root(default=CODE_ROOT)
 from datahunter.data_rights import LicenseRegistry, OPERATIONS, MODES, DataRightsError
 
 AUDIT = ROOT / 'data/interim/license_audit'

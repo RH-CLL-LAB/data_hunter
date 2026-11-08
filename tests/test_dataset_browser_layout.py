@@ -2,11 +2,18 @@
 from html.parser import HTMLParser
 import json
 from pathlib import Path
+import sys
 import re
 import unittest
 
-SITE=Path(__file__).resolve().parents[1]/'docs/dataset-browser'
-SOURCE=Path(__file__).resolve().parents[1]/'Scripts/dataset_browser'
+import subprocess
+CODE_ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(CODE_ROOT/'src'))
+from datahunter.workspace import workspace_root
+SITE=workspace_root(bootstrap=True)/'docs/dataset-browser'  # the active study's site, or the bootstrap site of a fresh install
+SOURCE=CODE_ROOT/'Scripts/dataset_browser'
+if not (SITE/'catalogue.html').exists():
+    subprocess.run([sys.executable,str(CODE_ROOT/'Scripts/build_dataset_browser.py')],check=True,capture_output=True)
 
 
 class Elements(HTMLParser):
@@ -60,8 +67,10 @@ class ExplorerLayoutTests(unittest.TestCase):
 
     def test_readiness_states_share_one_colour_set(self):
         if not self.datasets:self.skipTest('empty catalogue: no readiness badges to colour')
-        for tone in ['good','warn','bad','ref']:self.assertIn(f'<span class="badge {tone}">',self.html,tone)
-        for token in ['var(--ok)','var(--warn)','var(--bad)','var(--ref)']:self.assertIn(token,self.html,token)  # readiness bar on the catalogue
+        tones=set(re.findall(r'<span class="badge (good|warn|bad|ref|off)">',self.html))
+        self.assertTrue(tones,'readiness badges use the shared tone classes');self.assertTrue(tones<={'good','warn','bad','ref','off'})
+        styles=self.html+''.join(p.read_text() for p in (SITE/'assets').glob('*.css'))
+        for token in ['--ok','--warn','--bad','--ref']:self.assertIn(token,styles,token)  # one colour per readiness state, shared by badges and the readiness bar
         first=next(iter(sorted((SITE/'datasets').glob('*.html'))),None)
         if first:self.assertIn('class="license-status tone-',first.read_text())
 

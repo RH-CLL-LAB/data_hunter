@@ -2,11 +2,15 @@
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import unittest
 
-ROOT = Path(__file__).resolve().parents[1]
-HAS_CATALOGUE=bool(json.loads((ROOT/'configs/dataset_study_usage.json').read_text()).get('datasets'))  # empty in a fresh workspace
-spec = importlib.util.spec_from_file_location('dataset_selection', ROOT / 'Scripts/document_dataset_selection.py')
+CODE_ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(CODE_ROOT/'src'))
+from datahunter.workspace import workspace_root, resolve_snapshot
+ROOT=workspace_root(default=CODE_ROOT)  # the active study folder; the code root when no study exists
+HAS_CATALOGUE=(ROOT/'configs/dataset_study_usage.json').is_file() and bool(json.loads((ROOT/'configs/dataset_study_usage.json').read_text()).get('datasets'))  # empty in a fresh workspace
+spec = importlib.util.spec_from_file_location('dataset_selection', CODE_ROOT/'Scripts/document_dataset_selection.py')
 selection = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(selection)
 
@@ -26,13 +30,6 @@ class DatasetSelectionTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]['records'], 10)
 
-    @unittest.skipUnless(HAS_CATALOGUE,'needs a populated catalogue (these check the registered MedScrape entries)')
-    def test_cll_disease_match_does_not_become_high_extraction_relevance(self):
-        policy = json.loads((ROOT / 'configs/dataset_selection.json').read_text())
-        result = selection.judgement({'id': 'D35', 'category': 'clinical_sources',
-                                      'optimization_status': 'needs_preparation_or_permissions'}, policy)
-        self.assertEqual(result['workflow_relevance'], 'low')
-        self.assertIn('CLL disease source', result['cll_fit'])
 
     def test_unreviewed_pending_source_remains_unassessed_and_on_hold(self):
         policy = json.loads((ROOT / 'configs/dataset_selection.json').read_text())

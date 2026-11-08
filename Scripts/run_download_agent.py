@@ -15,10 +15,12 @@ import shutil
 import sys
 from zoneinfo import ZoneInfo
 
-ROOT=Path(__file__).resolve().parents[1]
+CODE_ROOT=Path(__file__).resolve().parents[1]
 MAX_DATASET_BYTES=20_000_000_000
-sys.path.insert(0,str(ROOT/'Scripts'))
-sys.path.insert(0,str(ROOT/'src'))
+sys.path.insert(0,str(CODE_ROOT/'Scripts'))
+sys.path.insert(0,str(CODE_ROOT/'src'))
+from datahunter.workspace import workspace_root
+ROOT=workspace_root(default=CODE_ROOT)
 import acquire_research_resources as acquisition
 from datahunter.data_rights import LicenseRegistry
 from collections import Counter
@@ -125,7 +127,7 @@ def process_job(job,locked,stage,original,acknowledgements,execute,caps,journal,
     if not execute:return {**result,'status':'eligible_dry_run','transfer_cap':budget}
     journal('transfer_authorized',{'resource_id':job['id'],'url':job['url'],'risks':risks,'acknowledged':sorted(acknowledgements),'hard_cap':budget})
     try:
-        record=acquisition.acquire(job,locked,base=stage,execute=True,journal=journal,license_context={'mode':license_report.get('mode','lenient'),'study_id':license_report.get('study_id') or license_report.get('default_study') or 'medscrape'})
+        record=acquisition.acquire(job,locked,base=stage,execute=True,journal=journal,license_context={'mode':license_report.get('mode','lenient'),'study_id':license_report.get('study_id') or license_report.get('default_study') or 'baseline'})
         return {**result,'status':'downloaded_quarantined' if risks else 'downloaded_staged_verified','record':record,
                 'promotion':'Not added to the original acquisition lock or cleared for workflow AI; inspect and register the approved delivered version first.'}
     except Exception as err:return {**result,'status':'transfer_failed','problem':str(err),'partial_files_retained':True}
@@ -151,14 +153,16 @@ def run(instructions_path,execute=False,root=ROOT):
     stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ');run_dir=root/'runs/downloads'/stamp;run_dir.mkdir(parents=True)
     save(run_dir/'instructions.json',spec)
     shutil.copyfile(instructions_path,run_dir/('original-instructions.csv' if Path(instructions_path).suffix.lower()=='.csv' else 'original-instructions.json'))
-    for p in [Path(__file__),root/'Scripts/acquire_research_resources.py']:
+    for p in [Path(__file__),CODE_ROOT/'Scripts/acquire_research_resources.py']:
         shutil.copyfile(p,run_dir/p.name)
-    stage=root/'data/quarantine/download_agent'/stamp;original=root/'data/raw/public_reference_collection/acquisitions/paper_followup_2026-10-30'
-    evidence={str(p.relative_to(root)):sha(p) for p in [catalogue_path,root/'configs/research_resources.json',root/'configs/research_resources.lock.json',root/'configs/dataset_download_reviews.json',root/'configs/resource_scope.json',root/'configs/data_licenses.json',root/'configs/data_license_assets.json',root/'src/datahunter/data_rights.py']}
-    role=root/'agents/dataset-download-agent.md'
-    if role.is_file():evidence[str(role.relative_to(root))]=sha(role)
-    for relative in evidence:
-        target=run_dir/'evidence'/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(root/relative,target)
+    stage=root/'data/quarantine/download_agent'/stamp;original=root/'data/acquisitions'
+    def evidence_key(p):return p.relative_to(root).as_posix() if p.resolve().is_relative_to(root) else p.relative_to(CODE_ROOT).as_posix()  # tool code is recorded by its code-root path
+    evidence_sources={evidence_key(p):p for p in [catalogue_path,root/'configs/research_resources.json',root/'configs/research_resources.lock.json',root/'configs/dataset_download_reviews.json',root/'configs/resource_scope.json',root/'configs/data_licenses.json',root/'configs/data_license_assets.json',CODE_ROOT/'src/datahunter/data_rights.py']}
+    role=CODE_ROOT/'agents/dataset-download-agent.md'
+    if role.is_file():evidence_sources['agents/dataset-download-agent.md']=role
+    evidence={relative:sha(source) for relative,source in evidence_sources.items()}
+    for relative,source in evidence_sources.items():
+        target=run_dir/'evidence'/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,target)
     def journal(kind,details):
         with (run_dir/'operations.jsonl').open('a') as stream:stream.write(json.dumps({'at':now(),'kind':kind,'details':details},ensure_ascii=False)+'\n')
     journal('run_started',{'execute':execute,'dataset_ids':spec['dataset_ids'],'license_mode':licenses.mode,'evidence':evidence,'technical_acknowledgements':sorted(acknowledgements)})

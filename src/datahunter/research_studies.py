@@ -4,13 +4,19 @@ import json
 import re
 from pathlib import Path
 
+try:
+    from .workspace import workspace_root, workspace_study_id
+except ImportError:  # loaded as a plain file, outside the package
+    from workspace import workspace_root, workspace_study_id
+
+
 def default_study(root=None):
-    """The workspace's baseline study id from configs/research_studies.json ('default_study'); 'medscrape' when unset."""
-    path = Path(root or Path(__file__).resolve().parents[2]) / 'configs/research_studies.json'
+    """The workspace's own study id from configs/research_studies.json ('default_study'); 'baseline' when unset."""
+    path = Path(root or workspace_root(default=Path(__file__).resolve().parents[2])) / 'configs/research_studies.json'
     try:
-        return json.loads(path.read_text()).get('default_study') or 'medscrape'
+        return json.loads(path.read_text()).get('default_study') or 'baseline'
     except (OSError, ValueError):
-        return 'medscrape'
+        return 'baseline'
 
 
 DEFAULT_STUDY = default_study()
@@ -59,9 +65,22 @@ EXECUTED_ACTIONS = {
 LOG_ACTIONS = BROWSER_ACTIONS | EXECUTED_ACTIONS
 
 
-def log_path(root, study_id):
+def study_dir(root, study_id):
+    """A study workspace (studies/<id>/) holds its own study at the top; any other id keeps the legacy nested folder."""
     normalize({'id': study_id, 'name': 'x', 'question': 'x', 'intended_use': 'x'})  # validates the ID
-    return Path(root) / 'docs/research-studies' / study_id / 'actions.jsonl'
+    root = Path(root)
+    if workspace_study_id(root) == study_id:
+        return root
+    return root / 'docs/research-studies' / study_id
+
+
+def reports_dir(root, study_id):
+    folder = study_dir(root, study_id)
+    return folder / 'reports' if folder == Path(root) else folder
+
+
+def log_path(root, study_id):
+    return study_dir(root, study_id) / 'actions.jsonl'
 
 
 def validate_log_event(event):

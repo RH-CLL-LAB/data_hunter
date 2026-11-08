@@ -24,9 +24,11 @@ import tarfile
 import xml.etree.ElementTree as ET
 import zipfile
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'src'))
-sys.path.insert(0, str(ROOT / 'Scripts'))
+CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CODE_ROOT / 'src'))
+from datahunter.workspace import workspace_root, snapshot_path, resolve_snapshot, snapshot_copy_path
+ROOT = workspace_root(default=CODE_ROOT)
+sys.path.insert(0, str(CODE_ROOT / 'Scripts'))
 from datahunter.data_rights import LicenseRegistry, file_digest
 from audit_dataset_downloads import LOCKS
 
@@ -374,6 +376,7 @@ def render(report, registry, policy):
             link('Current dataset catalogue',docs/'DATASET_SELECTION.md',folder)+
             ' · '+link('Priorities and access',docs/'DATASET_ACTION_PRIORITIES.md',folder)+
             '\n\nExact original locators, identities and scoped inputs: [manifest.json](manifest.json).\n')
+    WORKSPACE.mkdir(parents=True, exist_ok=True)
     (WORKSPACE/'README.md').write_text('# Dataset storage records\n\n'+
         link('Dataset catalogue',docs/'DATASET_SELECTION.md',WORKSPACE)+
         ' · '+link('Priorities and access',docs/'DATASET_ACTION_PRIORITIES.md',WORKSPACE)+
@@ -398,11 +401,13 @@ def main():
     directory = REPORTS / validation_id
     directory.mkdir(parents=True)
     manifest_path = PREPARED / 'metadata/manifest.json'
+    if not manifest_path.exists():  # a fresh workspace has no prepared inputs yet
+        write(manifest_path, {'schema_version': 1, 'files': []})
     manifest = read(manifest_path)
     locked = []
-    evidence_paths = [POLICY, REGISTRY, manifest_path, Path(__file__), ROOT / 'AGENTS.md',
-                      ROOT / 'Scripts/audit_dataset_downloads.py', ROOT / 'src/datahunter/data_rights.py',
-                      ROOT / 'tests/test_dataset_workspace.py',
+    evidence_paths = [POLICY, REGISTRY, manifest_path, Path(__file__), CODE_ROOT / 'AGENTS.md',
+                      CODE_ROOT / 'Scripts/audit_dataset_downloads.py', CODE_ROOT / 'src/datahunter/data_rights.py',
+                      CODE_ROOT / 'tests/test_dataset_workspace.py',
                       ROOT / 'configs/data_licenses.json', ROOT / 'configs/data_license_assets.json']
     for lock_name, base in LOCKS.items():
         lock = ROOT / lock_name
@@ -421,7 +426,7 @@ def main():
         previous = by_path.setdefault(entry['path'], entry)
         if previous['sha256'] != entry['sha256'] or previous['bytes'] != entry['bytes']:
             raise ValueError('conflicting_expected_identity: ' + entry['path'])
-    initial_evidence = {relative(p): file_digest(p) for p in evidence_paths}
+    initial_evidence = {snapshot_path(p, ROOT)['path']: file_digest(p) for p in evidence_paths}
     print(f'Checking {len(locked)} locked and {len(prepared)} prepared identities; {len(by_path)} unique paths.', flush=True)
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
         checked = list(pool.map(lambda x: check_artifact(x, policy['limits']), by_path.values()))
@@ -460,13 +465,13 @@ def main():
                         'family_notes': [policy['shared_family_notes'][f] for f in families if f in policy['shared_family_notes']],
                         'benchmark_requirements': policy['independent_benchmark_requirements']})
     # Data files are read-only throughout. Check evidence/config stability before publishing.
-    sources = [{'path': relative(p), 'sha256': file_digest(p)} for p in evidence_paths]
+    sources = [{**snapshot_path(p, ROOT), 'sha256': file_digest(p)} for p in evidence_paths]
     if any(initial_evidence[s['path']] != s['sha256'] for s in sources):
         raise ValueError('validation_configuration_changed_during_check')
     for source in sources:
-        destination = directory / 'code_and_config' / source['path']
+        destination = directory / 'code_and_config' / snapshot_copy_path(source)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / source['path'], destination)
+        shutil.copyfile(resolve_snapshot(source, ROOT), destination)
     summary = {'dataset_entries': len(results), 'locked_artifacts': len(locked), 'prepared_artifacts': len(prepared),
                'locked_integrity': dict(Counter(artifacts[f['path']]['integrity'] for f in locked)),
                'prepared_integrity': dict(Counter(artifacts[f['path']]['integrity'] for f in prepared)),

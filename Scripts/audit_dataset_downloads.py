@@ -22,10 +22,19 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from public_resources import contained, digest, write_json
 
-ROOT = Path(__file__).resolve().parents[1]
+CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CODE_ROOT / 'src'))
+from datahunter.workspace import workspace_root
+ROOT = workspace_root(default=CODE_ROOT)
 COLLECTION = ROOT / 'data/raw/public_reference_collection'
-BASE = COLLECTION / 'acquisitions/paper_followup_2026-10-30'
+BASE = ROOT / 'data/acquisitions'
 OUTPUT = ROOT / 'data/interim/dataset_download_audit'
+
+
+def location_parts(path):
+    """Display path of a held file: relative to the collection folder when inside it, else to the workspace."""
+    path = Path(path); collection = COLLECTION.relative_to(ROOT)
+    return path.relative_to(collection).parts if path.is_relative_to(collection) else path.parts
 LOCKS = {
     'configs/public_resources.lock.json': COLLECTION / 'downloaded_data',
     'configs/public_resources.priority1.lock.json': COLLECTION / 'acquisitions/priority1_2026-10-29',
@@ -195,7 +204,7 @@ def reconcile(catalog, jobs, results, verified):
         successes = [j for j in selected if results.get(j['id'], {}).get('state') == 'downloaded_verified'
                      and j['id'] in {r.get('id') for r in verified if r['state'] == 'verified' and not r.get('content_state')}]
         data = [j for j in successes if j['kind'] in DATA_KINDS]
-        candidates += ['data/raw/public_reference_collection/acquisitions/paper_followup_2026-10-30/' + j['path'] for j in successes]
+        candidates += [str(BASE.relative_to(ROOT)) + '/' + j['path'] for j in successes]
         missing = [j['id'] for j in selected if j['kind'] in DATA_KINDS and j not in data]
         if key in MANUAL:
             link, action = MANUAL[key]
@@ -224,15 +233,15 @@ def local_links(paths):
     """Show each held package, without collapsing data and docs into one root."""
     groups = {}
     for path in sorted(set(paths)):
-        relative = Path(path).relative_to(COLLECTION.relative_to(ROOT)).parts
-        offset = 2 if relative[0] == 'acquisitions' else 1
+        relative = location_parts(path)
+        offset = 2 if relative[0] == 'acquisitions' or relative[:2] == ('data', 'acquisitions') else 1  # batch folders and the study's acquisitions folder
         tail = relative[offset:]
         length = offset + (2 if tail and tail[0] in {'datasets', 'provider', 'references'} else 1)
         if tail and tail[0] == 'repositories':
             length = len(relative)
         groups.setdefault(relative[:length], []).append(path)
     locations = [os.path.commonpath(group) for group in groups.values()]
-    return '<br>'.join(f'[{Path(path).relative_to(COLLECTION.relative_to(ROOT))}](../{path})' for path in locations) or '—'
+    return '<br>'.join(f'[{Path(*location_parts(path))}](../{path})' for path in locations) or '—'
 
 
 def main():
@@ -248,7 +257,8 @@ def main():
     from acquire_research_resources import validate_scope
     validate_scope(manifest)
     policy=json.loads((ROOT/'configs/resource_scope.json').read_text())
-    receipt = json.loads((BASE / 'acquisition-report.json').read_text())
+    receipt_path = BASE / 'acquisition-report.json'  # written by the acquisition script; absent until a first acquisition
+    receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else {'manifest_sha256': digest(ROOT / 'configs/research_resources.json'), 'results': []}
     receipt_stale = receipt['manifest_sha256'] != digest(ROOT / 'configs/research_resources.json')
     if receipt_stale and not args.snapshot_in_progress:
         raise ValueError('acquisition_report_is_stale_run_download_audit_first')
@@ -298,6 +308,10 @@ def main():
                 results[job['id']] = {'id':job['id'],'state':'downloaded_verified'}
             elif job['id'] not in results or results[job['id']]['state'] == 'downloaded_verified':
                 results[job['id']] = {'id':job['id'],'state':'not_yet_downloaded'}
+    for job in manifest['resources']:  # jobs registered after the last acquisition run have no outcome yet
+        if job['id'] not in results:
+            results[job['id']] = ({'id': job['id'], 'state': job['acquisition'], 'reason': job.get('reason', '')} if job['acquisition'] != 'direct'
+                                  else {'id': job['id'], 'state': 'not_yet_downloaded'})
     receipt['counts'] = dict(Counter(r['state'] for r in results.values()))
     catalog = json.loads((ROOT / 'configs/public_resource_acquisition.json').read_text())['resources']
     rows = reconcile(catalog, manifest['resources'], results, verified)
@@ -317,7 +331,8 @@ def main():
                 row['missing_public_artifacts'] += cms['missing_data_members']
                 row['manual_or_next_action']='Acquire the distinct provider download-route archive; the stats/trends archive named sample20 contains sample1. Preserve both originals; no record repairs.'
 
-    cleanup=json.loads((ROOT/'configs/resource_cleanup.json').read_text())
+    cleanup_path=ROOT/'configs/resource_cleanup.json'  # record of a past storage cleanup; optional
+    cleanup=json.loads(cleanup_path.read_text()) if cleanup_path.exists() else {}
     verified_ids = {r.get('id') for r in verified if r['state'] == 'verified' and not r.get('content_state')}
     direct_jobs = [j for j in manifest['resources'] if j['acquisition'] == 'direct']
     automatic_remaining = [j['id'] for j in direct_jobs if j['id'] not in verified_ids or results[j['id']]['state'] != 'downloaded_verified']

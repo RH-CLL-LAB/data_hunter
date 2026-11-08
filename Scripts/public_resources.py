@@ -13,13 +13,17 @@ import gzip
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
+import sys
 import re
 import subprocess
 import tarfile
 import tempfile
 import zipfile
 
-PROJECT = Path(__file__).resolve().parents[1]
+CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CODE_ROOT / 'src'))
+from datahunter.workspace import workspace_root
+PROJECT = workspace_root(default=CODE_ROOT)
 COLLECTION = PROJECT / "data/raw/public_reference_collection"
 DATA = COLLECTION / "downloaded_data"
 LOCK = PROJECT / "configs/public_resources.lock.json"

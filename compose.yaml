@@ -4,8 +4,8 @@
 #   docker compose up site                    serve Data Hunter at http://127.0.0.1:8767/
 #   docker compose run --rm download-agent ... run a reviewed acquisition job (network enabled)
 #
-# Every service mounts this checkout at /app, so registries, receipts and acquired
-# holdings are used in place. Containers run as your user id so files they write
+# Every service mounts this checkout at /app, so the study folders under studies/
+# (registries, receipts, acquired holdings, generated site) are used in place. Containers run as your user id so files they write
 # stay yours.
 
 x-base: &base
@@ -31,9 +31,9 @@ services:
       - .:/app:ro
     ports:
       - "127.0.0.1:8767:8767"
-    command: python -m http.server 8767 --bind 0.0.0.0 --directory docs/dataset-browser
+    command: python Scripts/serve.py 8767 --bind 0.0.0.0
 
-  # The one job that needs the network: reviewed, hash-verified acquisition into data/.
+  # The one job that needs the network: reviewed, hash-verified acquisition into the study's data/.
   download-agent:
     <<: *base
     profiles: [acquire]

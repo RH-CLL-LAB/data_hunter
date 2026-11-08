@@ -26,7 +26,7 @@ class ResearchStudyTests(unittest.TestCase):
         self.write('configs/data_licenses.json',self.policy);self.write('configs/data_license_assets.json',{'schema_version':1,'files':[{'path':'source.csv','sha256':'a'*64,'resource':'data'}]})
         self.write('request.json',{'schema_version':1,'kind':'datahunter_research_study','study':self.profile,'dataset_ids':['A'],'dataset_annotations':{'A':{'relevance':'high','role':'benchmark','tags':['units'],'note':'Reference needed'}}})
     def write(self,path,value):(self.root/path).write_text(json.dumps(value))
-    def registry(self,id='medscrape'):
+    def registry(self,id='baseline'):
         return LicenseRegistry(self.root/'configs/data_licenses.json',self.root/'configs/data_license_assets.json',root=self.root,study_id=id)
     def register(self):
         with patch('builtins.print'):return script.register(self.root/'request.json',True,self.root)
@@ -79,7 +79,7 @@ class ResearchStudyTests(unittest.TestCase):
         self.assertNotIn('new-study',[s['id'] for s in registry['studies']]);self.assertTrue(result['applied'])
         log=[json.loads(l) for l in (folder/'actions.jsonl').read_text().splitlines()]
         self.assertEqual(log[-1]['action'],'study_removed');self.assertEqual(log[-1]['source'],'register_research_study.py')
-        with self.assertRaisesRegex(ValueError,'default_study_cannot_be_removed'):script.remove('medscrape',True,self.root)
+        with self.assertRaisesRegex(ValueError,'default_study_cannot_be_removed'):script.remove('baseline',True,self.root)
         with self.assertRaisesRegex(ValueError,'unknown_research_study'):script.remove('never-existed',True,self.root)
 
     def test_resource_scoped_to_another_study_never_grants_the_default_study(self):
@@ -87,7 +87,7 @@ class ResearchStudyTests(unittest.TestCase):
         r.update(study_id='new-study',study_sha256=fingerprint(self.profile))
         self.write('configs/data_licenses.json',self.policy)
         self.assertEqual(self.registry('new-study').check(['a'*64],['local_inference'])['status'],'allowed')
-        report=self.registry('medscrape').check(['a'*64],['local_inference'])
+        report=self.registry('baseline').check(['a'*64],['local_inference'])
         self.assertEqual(report['status'],'blocked')
         self.assertEqual(report['decisions'][0]['reason'],'permission_recorded_for_another_study')
     def test_exact_study_review_applies_only_to_its_brief(self):

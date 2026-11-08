@@ -4,13 +4,17 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
 
-ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('dataset_workspace', ROOT / 'Scripts/validate_dataset_workspace.py')
+CODE_ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(CODE_ROOT/'src'))
+from datahunter.workspace import workspace_root
+ROOT=workspace_root(default=CODE_ROOT)  # the active study folder; the code root when no study exists
+spec = importlib.util.spec_from_file_location('dataset_workspace', CODE_ROOT / 'Scripts/validate_dataset_workspace.py')
 workspace = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(workspace)
 
@@ -77,6 +81,7 @@ class WorkspaceValidationTests(unittest.TestCase):
             self.assertFalse(result['prepared_manifest_bound'])
             self.assertEqual(result['status'], 'blocked_or_incomplete')
 
+    @unittest.skipUnless((ROOT/'configs/dataset_validation.json').is_file(),'needs a study workspace')
     def test_all_curated_ids_exist_and_source_scopes_never_include_answers(self):
         policy = json.loads((ROOT / 'configs/dataset_validation.json').read_text())
         registry = json.loads((ROOT / 'configs/dataset_study_usage.json').read_text())

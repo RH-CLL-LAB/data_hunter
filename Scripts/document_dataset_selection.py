@@ -11,8 +11,10 @@ import shutil
 import sys
 from zoneinfo import ZoneInfo
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'src'))
+CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CODE_ROOT / 'src'))
+from datahunter.workspace import workspace_root, snapshot_path, snapshot_copy_path
+ROOT = workspace_root(default=CODE_ROOT)
 from datahunter.data_rights import file_digest
 
 DOC = ROOT / 'docs/DATASET_SELECTION.md'
@@ -199,8 +201,9 @@ def render_catalogue(report, usage, policy, validation, folder):
     records = report['datasets']
     by_id = {d['id']: d for d in records}
     checked = validation['summary']
-    lit = read(ROOT / 'configs/harmonization_literature_review.json')
-    fulltexts = {f['study_id']: f for f in read(FULLTEXTS / 'fulltext_report.json')['studies']}
+    lit_path = ROOT / 'configs/harmonization_literature_review.json'  # project-specific literature review; optional
+    lit = read(lit_path) if lit_path.exists() else {'search_window': 'none recorded', 'indexed_records_screened': 0, 'reviewed_studies': [], 'citation_trace_summary': [], 'queries': []}
+    fulltexts = {f['study_id']: f for f in read(FULLTEXTS / 'fulltext_report.json')['studies']} if (FULLTEXTS / 'fulltext_report.json').exists() else {}  # optional in a fresh workspace
     ft_counts = Counter(f['status'] for f in fulltexts.values())
     lines = ['# Datasets: availability, selection and benchmark readiness', '',
         '**Browse the [HTML dataset overview](dataset-browser/index.html)** for filters and linked dataset pages. '
@@ -328,7 +331,10 @@ def update_action_queues(records, validation, policy=None):
     path=ROOT/'docs/DATASET_ACTION_PRIORITIES.md'
     text=path.read_text()
     start,end='<!-- current-access-queues:start -->','<!-- current-access-queues:end -->'
-    if start in text:text=text.split(start,1)[0].rstrip()+'\n'
+    text=text.split(start,1)[0] if start in text else text
+    if 'No datasets are registered yet' in text:  # the empty-workspace placeholder gives way to the generated queues
+        text='# Dataset actions: priorities, requests and completion gates\n'
+    text=text.rstrip()+'\n'
     pre=(policy or {}).get('preaccess_license_policy',{})
     lines=[start,'## License checks before registration or download','',
         'Check publicly available licences, DUA templates, dataset-use limitations, research scope, software/model deployment, export and publication terms **before spending time on an account/application or a dataset transfer**. If a necessary term is only available from the owner or after login, record that gap and ask for a sample agreement or scope clarification first. This is an acquisition-planning stage; the downloader review and the source-bound AI gate remain separate.', '',
@@ -414,7 +420,7 @@ def main():
         if not p.is_file() or p.stat().st_size != f['bytes'] or file_digest(p) != f['sha256']:
             raise ValueError('selection_source_missing_or_changed: ' + f['path'])
     supplement_path = ROOT / 'data/raw/public_reference_collection/acquisitions/harmonization_review_2026-11-04/recent_reference_inspection.json'
-    supplements = read(supplement_path)
+    supplements = read(supplement_path) if supplement_path.exists() else {'files': []}  # optional inspection record
     supplement_profiles = {}
     for artifact in supplements['files']:
         path = artifact['path']
@@ -435,7 +441,7 @@ def main():
         if tables:
             supplement_profiles[path] = tables
     associated = Counter(f['path'] for d in validation['datasets'] for f in d['obtained_artifacts'])
-    fulltexts = {f['study_id']: f for f in read(FULLTEXTS / 'fulltext_report.json')['studies']}
+    fulltexts = {f['study_id']: f for f in read(FULLTEXTS / 'fulltext_report.json')['studies']} if (FULLTEXTS / 'fulltext_report.json').exists() else {}  # optional in a fresh workspace
     studies = {s['id']: s for s in usage['studies']}
     generation = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     folder = BASE / generation
@@ -471,17 +477,17 @@ def main():
                'validation_id': validation['validation_id'], 'rechecked_unique_artifacts': len(artifacts),
                'source_repairs': 0, 'downloads': 0, 'model_calls': 0}
     summary['preaccess_coverage']=preaccess_coverage(records,policy)
-    evidence_paths = [POLICY, USAGE, source, receipt_path, supplement_path, Path(__file__),
-                      ROOT / 'docs/DATASET_ACTION_PRIORITIES.md', FULLTEXTS / 'fulltext_report.json']
+    evidence_paths = [p for p in [POLICY, USAGE, source, receipt_path, supplement_path, Path(__file__),
+                      ROOT / 'docs/DATASET_ACTION_PRIORITIES.md', FULLTEXTS / 'fulltext_report.json'] if p.exists()]  # optional records may be absent in a fresh workspace
     for review in policy.get('preaccess_license_policy',{}).get('reviews',[]):
         for item in review.get('evidence',[]):
             path=ROOT/item['path']
             if not path.is_file() or file_digest(path)!=item['sha256']:
                 raise ValueError('preaccess_license_evidence_missing_or_changed:'+item['path'])
             if path not in evidence_paths:evidence_paths.append(path)
-    evidence = [{'path': str(p.relative_to(ROOT)), 'sha256': file_digest(p)} for p in evidence_paths]
-    for p in evidence_paths:
-        copy = folder / 'code_and_evidence' / p.relative_to(ROOT)
+    evidence = [{**snapshot_path(p, ROOT), 'sha256': file_digest(p)} for p in evidence_paths]
+    for p, item in zip(evidence_paths, evidence):
+        copy = folder / 'code_and_evidence' / snapshot_copy_path(item)
         copy.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(p, copy)
     report = {'schema_version': 1, 'generated_at': datetime.now(timezone.utc).isoformat(),

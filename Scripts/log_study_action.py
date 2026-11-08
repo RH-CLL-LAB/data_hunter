@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Append one action to a registered research study's log (docs/research-studies/<id>/actions.jsonl).
+"""Append one action to a registered research study's log (studies/<id>/actions.jsonl).
 
 Agents call this after an intake/discovery run, a licence-review registration or any other
 study-scoped action. The log records what happened; it grants no data permission."""
@@ -9,8 +9,10 @@ import json
 from pathlib import Path
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'src'))
+CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CODE_ROOT / 'src'))
+from datahunter.workspace import workspace_root
+ROOT = workspace_root(default=CODE_ROOT)
 from datahunter.research_studies import LOG_ACTIONS, append_log, registered
 
 

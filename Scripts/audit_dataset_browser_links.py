@@ -8,11 +8,15 @@ from hashlib import sha256
 from html.parser import HTMLParser
 import json
 from pathlib import Path
+import sys
 import re
 from urllib.parse import unquote, urlsplit, urlunsplit
 import httpx
 
-ROOT=Path(__file__).resolve().parents[1]
+CODE_ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(CODE_ROOT/'src'))
+from datahunter.workspace import workspace_root
+ROOT=workspace_root(default=CODE_ROOT)
 SITE=ROOT/'docs/dataset-browser'
 BASE=ROOT/'data/interim/dataset_browser_links'
 LIMIT=131072

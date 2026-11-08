@@ -77,7 +77,7 @@
  const removeButton=document.querySelector('[data-remove-study]');
  if(removeButton){
   const current=api.current(),registeredStudy=api.isRegistered(current.id);removeButton.disabled=current.id===api.defaultId();
-  removeButton.textContent=registeredStudy?'Remove from registry…':'Delete browser draft…';
+  removeButton.textContent=registeredStudy?'Retire study…':'Delete browser draft…';
   removeButton.addEventListener('click',async()=>{
    const message=document.querySelector('[data-new-study-status]');
    if(!registeredStudy){

@@ -38,7 +38,7 @@ resembles an existing study: search first without de-duplicating against the
 catalogue, then match results to existing catalogue IDs, and annotate the study
 only from that search (see `agents/dataset-intake-agent.md`, "New research
 study"). Keep each study's reports as tracked Markdown in
-`docs/research-studies/<study-id>/`, registered with the study, and record every
+`studies/<study-id>/reports/`, registered with the study, and record every
 important study action in its append-only `actions.jsonl`: registration,
 discovery runs, licence decisions and revisions, downloads (dry, partial,
 minimal or full) and file operations. The registration, licence-review and

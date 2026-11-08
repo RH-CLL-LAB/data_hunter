@@ -78,7 +78,7 @@ research profile before downloads if necessary, and retain its context in the ru
 ## Study log
 
 `Scripts/run_download_agent.py` appends a `download_run` entry to the study's
-`docs/research-studies/<study-id>/actions.jsonl` after every run, dry or executed (instructions
+`studies/<study-id>/actions.jsonl` after every run, dry or executed (instructions
 without a research study log to the licence registry's default study). Any transfer
 done outside that script — e.g. a reviewed full-release acquisition — must be logged with
 `Scripts/log_study_action.py --action download_run`, stating scope (minimal/full/partial), datasets,

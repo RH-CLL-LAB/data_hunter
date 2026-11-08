@@ -66,7 +66,7 @@ class LicenseReviewTests(unittest.TestCase):
         self.assertFalse((self.root / 'configs/dataset_license_reviews.json').exists())
 
     def test_registered_decisions_and_revisions_are_logged_to_the_study(self):
-        log = self.root / 'docs/research-studies/medscrape/actions.jsonl'
+        log = self.root / 'docs/research-studies/baseline/actions.jsonl'
         review.review(self.path, root=self.root)
         self.assertFalse(log.exists())  # validation alone is not an action on the study
         review.review(self.path, True, self.root)

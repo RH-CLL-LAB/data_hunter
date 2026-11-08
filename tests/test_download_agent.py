@@ -150,7 +150,7 @@ class DownloadAgentTests(unittest.TestCase):
         self.assertEqual(events[-1]['kind'],'run_finished')
         self.assertEqual(len([e for e in events if e['kind']=='dataset_outcome']),3)
         self.assertFalse((self.root/'data/raw').exists())
-        study_log=[json.loads(l) for l in (self.root/'docs/research-studies/medscrape/actions.jsonl').read_text().splitlines()]
+        study_log=[json.loads(l) for l in (self.root/'docs/research-studies/baseline/actions.jsonl').read_text().splitlines()]
         self.assertEqual(study_log[-1]['action'],'download_run');self.assertTrue(study_log[-1]['detail'].startswith('EXECUTED: scope minimal'))
         self.assertIn('downloaded_quarantined',study_log[-1]['detail']);self.assertEqual(study_log[-1]['run'],str(run.relative_to(self.root)))
 
@@ -160,7 +160,7 @@ class DownloadAgentTests(unittest.TestCase):
             report=agent.run(instructions,root=self.root)
         self.assertEqual(report['unique_artifacts'][0]['status'],'eligible_dry_run')
         self.assertFalse((self.root/report['quarantine_directory']).exists())
-        self.assertTrue(json.loads((self.root/'docs/research-studies/medscrape/actions.jsonl').read_text().splitlines()[-1])['detail'].startswith('Dry run'))
+        self.assertTrue(json.loads((self.root/'docs/research-studies/baseline/actions.jsonl').read_text().splitlines()[-1])['detail'].startswith('Dry run'))
         self.job['provider_sha256']=hashlib.sha256(b'correct').hexdigest()
         self.write('configs/data_license_assets.json',{'schema_version':1,'files':[
             {'path':'reviewed/expected.json','sha256':self.job['provider_sha256'],'resource':'table_rights'}]})

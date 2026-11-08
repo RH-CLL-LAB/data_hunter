@@ -1,8 +1,12 @@
 """The repository licence and citation files stay present and consistent."""
 from pathlib import Path
+import sys
 import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'src'))
+from datahunter.workspace import workspace_root
+SITE=workspace_root(default=ROOT/'studies/.bootstrap')/'docs/dataset-browser'
 
 
 class ProjectLicenseTests(unittest.TestCase):
@@ -18,16 +22,17 @@ class ProjectLicenseTests(unittest.TestCase):
         # The credit and licence line come before the table of contents; the full citation section exists further down.
         self.assertLess(readme.index('Developed by **Nikola Tom**'),readme.index('## Contents'));self.assertIn('Tom N, Niemann CU.',readme)
 
+    @unittest.skipUnless((SITE/'index.html').exists(),'needs a built site (Scripts/build_dataset_browser.py)')
     def test_generated_site_points_at_the_licence_and_citation(self):
-        html=(ROOT/'docs/dataset-browser/index.html').read_text()
+        html=(SITE/'index.html').read_text()
         self.assertIn('Apache-2.0',html);self.assertIn('CITATION.cff',html);self.assertNotIn('id="cite"',html)
         self.assertIn('href="cite.html"',html)
-        cite=(ROOT/'docs/dataset-browser/cite.html').read_text()
+        cite=(SITE/'cite.html').read_text()
         self.assertIn('id="cite"',cite);self.assertIn('Tom N, Niemann CU. Data Hunter:',cite);self.assertIn('data-copy-text="citation-bibtex"',cite)
         for text in [cite,(ROOT/'CITATION.cff').read_text(),(ROOT/'NOTICE').read_text()]:self.assertIn('RH-CLL-LAB/data_hunter',text)
-        health=ROOT/'docs/dataset-browser/link-health.html'
+        health=SITE/'link-health.html'
         if health.exists():self.assertNotIn('127.0.0.1',health.read_text())
-        for page in (ROOT/'docs/dataset-browser').rglob('*.html'):self.assertIn('developed by Nikola Tom',page.read_text(),page)
+        for page in SITE.rglob('*.html'):self.assertIn('developed by Nikola Tom',page.read_text(),page)
 
 
 if __name__=='__main__':unittest.main()

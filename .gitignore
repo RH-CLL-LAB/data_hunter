@@ -1,16 +1,10 @@
-# Local workspace: acquired sources, receipts, run archives, logs, credentials.
+# Study workspaces (registries, notices, acquired data, runs, generated site) and credentials.
 .env
 .env.*
 *.pem
 *.key
-/data/raw/
-/data/incoming_manual/
-/data/quarantine/
-/data/interim/
-/data/processed/
-/data/datasets/
-/runs/*
-!/runs/README.md
+/studies/*
+!/studies/README.md
 /logs/
 *.log
 /tmp/

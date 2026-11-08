@@ -16,7 +16,10 @@ import json
 from pathlib import Path
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CODE_ROOT / 'src'))
+from datahunter.workspace import workspace_root
+ROOT = workspace_root(default=CODE_ROOT)
 
 LICENCE_CHECKS_HEADING = 'License checks before registration or download'  # linked by generated pages; keep its wording
 

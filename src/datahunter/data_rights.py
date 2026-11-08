@@ -22,7 +22,11 @@ except ModuleNotFoundError as error:  # loaded as a plain file, outside the pack
         raise
     from research_studies import DEFAULT_STUDY, default_study, registered as registered_study, fingerprint as study_fingerprint
 
-ROOT = Path(__file__).resolve().parents[2]
+try:
+    from .workspace import workspace_root
+except ImportError:  # loaded as a plain file, outside the package
+    from workspace import workspace_root
+ROOT = workspace_root(default=Path(__file__).resolve().parents[2])
 POLICY = ROOT / 'configs/data_licenses.json'
 ASSETS = ROOT / 'configs/data_license_assets.json'
 OPERATIONS = {'local_inference', 'local_embedding', 'remote_inference',

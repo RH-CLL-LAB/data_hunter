@@ -15,8 +15,10 @@ import re
 import shutil
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'src'))
+CODE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CODE_ROOT / 'src'))
+from datahunter.workspace import workspace_root
+ROOT = workspace_root(default=CODE_ROOT)
 from datahunter.data_rights import LicenseRegistry, OPERATIONS, _read
 from datahunter.research_studies import default_study, normalize as normalize_study, registered as registered_study, fingerprint as study_fingerprint, append_log as append_study_log
 
@@ -164,7 +166,7 @@ def review(path, apply=False, root=ROOT):
         (run / name).write_text(json.dumps(value, indent=2, ensure_ascii=False) + '\n')
     save('request.json', request)
     shutil.copyfile(__file__, run / 'review-importer.py')
-    role = root / 'agents/dataset-license-review-agent.md'
+    role = CODE_ROOT / 'agents/dataset-license-review-agent.md'
     if role.is_file():
         shutil.copyfile(role, run / 'agent-definition.md')
     save('policy-before.json', policy)

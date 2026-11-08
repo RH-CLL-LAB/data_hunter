@@ -182,10 +182,10 @@ brief resembles another study's:
    shortlist come from this search; catalogue entries it did not find stay unassessed for the study.
    Mark them as intake suggestions, never licence approvals; preserve human annotations.
 4. **Keep the record with the study.** Save the report as tracked Markdown in
-   `docs/research-studies/<study-id>/` (run folders are not versioned) and register it through the
+   `studies/<study-id>/reports/` (run folders are not versioned) and register it through the
    study request's `reports` (path, title, date, SHA-256, run). Log the run with
    `Scripts/log_study_action.py --study <id> --action discovery_run --detail ... --run ...`.
-   Registration appends to `docs/research-studies/<study-id>/actions.jsonl` automatically.
+   Registration appends to `studies/<study-id>/actions.jsonl` automatically.
 
 Discovery downloads no datasets. Files the project already holds remain shared holdings; holding
 a file is not permission for the study.

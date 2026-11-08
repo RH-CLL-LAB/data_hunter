@@ -30,16 +30,17 @@ Licence: [Apache 2.0](LICENSE). Citation: see [How to cite](#how-to-cite).
 
 | Part | Where | What it does |
 |---|---|---|
-| The site | `docs/dataset-browser/` (generated), `Scripts/build_dataset_browser.py`, `Scripts/dataset_browser/` | Research studies, licence-first dataset search, catalogue with filters and shortlists, dataset records, licence decisions, download and file tasks, tutorial. |
-| Workflow scripts | `Scripts/` | Study registration and logging, intake and download agents, licence review and audit, workspace validation, catalogue documentation, link audit, release export. See `Scripts/README.md`. |
+| The site | `studies/<id>/docs/dataset-browser/` (generated per study), `Scripts/build_dataset_browser.py`, `Scripts/dataset_browser/` | Research studies, licence-first dataset search, catalogue with filters and shortlists, dataset records, licence decisions, download and file tasks, tutorial. |
+| Workflow scripts | `Scripts/` | Study registration and switching, logging, intake and download agents, licence review and audit, workspace validation, catalogue documentation, link audit, local site server. See `Scripts/README.md`. |
 | Agent definitions | `agents/` | The roles a coding agent follows for intake, licence review, downloads and file operations. |
-| Registries | `configs/` | Dataset selection, study usage, validation, research studies, licence decisions and acquisition locks. They start empty. |
+| Study folders | `studies/<id>/` | Everything one study produces, in one place: its registries (`configs/`), retained notices, quarantine and acquired data (`data/`), intake, download and review runs (`runs/`), reports, action log and generated site (`docs/`). Created empty when a study is registered; never committed. |
+| Registry templates | `templates/study/configs/` | The empty registries a new study folder starts from. |
 | Shared modules | `src/datahunter/` | The licence registry (`data_rights.py`) and the research-study registry (`research_studies.py`). |
 
-This is the code-only release. The workspace starts empty: no datasets,
-studies, searches, licence or access reviews, download records or acquired
-holdings. Those are created by your own studies, searches and reviews and stay
-in your workspace.
+This is the code-only release. There are no studies yet: no datasets,
+searches, licence or access reviews, download records or acquired holdings.
+Each study you create gets its own folder under `studies/`, and everything it
+produces stays there.
 
 ## Installation
 
@@ -95,32 +96,41 @@ empty.
 
 ## Open Data Hunter
 
-The site is prebuilt in `docs/dataset-browser/`. Serve it locally (opening the
-files directly also works, but browser storage for research studies is then
-isolated per page):
-
-```bash
-python3 -m http.server 8767 --bind 127.0.0.1 --directory docs/dataset-browser
-```
-
-Then open <http://127.0.0.1:8767/> and start with **Tutorial** in the
-navigation.
-
-Rebuild the site after registries change:
+Build the site, then serve it:
 
 ```bash
 .venv/bin/python Scripts/build_dataset_browser.py
 ```
 
-When no catalogue receipts exist yet, the build creates the empty workspace
-state itself (`Scripts/init_empty_workspace.py`). Once sources have been
-acquired, `Scripts/validate_dataset_workspace.py` and
-`Scripts/document_dataset_selection.py` produce the receipts the build reads.
+```bash
+.venv/bin/python Scripts/serve.py
+```
+
+Then open <http://127.0.0.1:8767/> and start with **Tutorial** in the
+navigation. With no study yet, the build uses a bootstrap workspace
+(`studies/.bootstrap/`) so the tutorial and the New-study form are available.
+
+The server shows the **active study**. Registering a study makes it active;
+switch with `Scripts/study.py use <id>` and list studies with
+`Scripts/study.py list`. The server follows the switch without a restart.
+
+Rebuild the site after the active study's registries change:
+
+```bash
+.venv/bin/python Scripts/build_dataset_browser.py
+```
+
+Once sources have been acquired, `Scripts/validate_dataset_workspace.py` and
+`Scripts/document_dataset_selection.py` produce the receipts the build reads;
+for a study without sources the build creates the empty state itself.
 
 ## The workflow
 
 1. **Create a research study** on the Research studies page: ID, question,
-   intended use, population, targets, inclusion and exclusion.
+   intended use, population, targets, inclusion and exclusion. Export it and
+   register it with `Scripts/register_research_study.py --request study.json
+   --apply`: this creates `studies/<id>/` with empty registries and makes it
+   the active study.
 2. **Search for its datasets**: the Add datasets page generates a licence-first
    discovery prompt; pass it to Claude Code or Codex with
    `agents/dataset-intake-agent.md`. The agent retains public licence notices
@@ -132,15 +142,15 @@ acquired, `Scripts/validate_dataset_workspace.py` and
 5. **Prepare downloads and file tasks** from the selection bar as prompts, JSON
    or CSV for `agents/dataset-download-agent.md` and
    `agents/dataset-operations-agent.md`. Downloading grants no AI-use permission.
-6. **Export and register the study** with
-   `Scripts/register_research_study.py --request study.json --apply`; remove
-   one with `--remove STUDY_ID --apply`. Every important action is appended to
-   the study's log under `docs/research-studies/<id>/`.
+6. **Re-export and register the study** after changing its shortlist or
+   annotations; retire one with `--remove STUDY_ID --apply` (its folder is
+   kept). Every important action is appended to `studies/<id>/actions.jsonl`.
 
 ## Run with Docker
 
 `Dockerfile` and `compose.yaml` provide the same environment without a local
-Python. Every service mounts this checkout at `/app` and runs as your user.
+Python. Every service mounts this checkout, study folders included, at `/app`
+and runs as your user.
 
 ```bash
 docker compose run --rm build-test
@@ -152,24 +162,25 @@ rebuilds the site and runs both test suites with networking disabled.
 docker compose up site
 ```
 
-serves the site at <http://127.0.0.1:8767/> from a read-only mount.
+serves the active study's site at <http://127.0.0.1:8767/> from a read-only mount.
 `download-agent` (profile `acquire`) is the one service with network access,
 for reviewed acquisition jobs. Claude Code or Codex work on the checkout
 itself, not inside a container.
 
 ## Development and tests
 
-- Site sources live in `Scripts/dataset_browser/`; `docs/dataset-browser/assets/`
-  is a generated copy and a test fails if the two differ. Edit the sources, run
-  the build, then run the tests.
-- `Scripts/export_public_release.py --target DIR` cuts a code-only release
-  like this one from a working checkout: it copies the tool's code, empties the
-  registries, builds the empty site and runs the tests in the target.
+- Site sources live in `Scripts/dataset_browser/`; the `assets/` folder of a
+  built site is a generated copy and a test fails if the two differ. Edit the
+  sources, run the build, then run the tests.
+- Study folders are ignored by Git, so a checkout is always the code-only
+  release: nothing a study searched, reviewed or downloaded is committed.
+- `DATA_HUNTER_STUDY=<id>` selects a study for one command;
+  `DATA_HUNTER_WORKSPACE=<folder>` points the scripts at any other workspace.
 
 ## Data, licences and AI use
 
 Before any dataset-based inference or embeddings, read the licence register
-the audit script generates (`docs/DATA_LICENSES_AND_AI_USE.md`) and run the
+the audit script generates (`studies/<id>/docs/DATA_LICENSES_AND_AI_USE.md`) and run the
 source-bound licence preflight. Lenient mode is the default and blocks only an
 explicit applicable AI prohibition; restrictive mode also requires explicit AI
 approval. Both require underlying access and use rights with current
@@ -182,14 +193,19 @@ not explicit approval. Holding a file is never permission to use it.
 
 ```text
 agents/                    agent role definitions
-configs/                   registries (empty until your studies fill them)
-docs/dataset-browser/      the generated site
-docs/research-studies/     one folder per registered study: reports, actions.jsonl
-Scripts/                   workflow, audit, build and release scripts
+Scripts/                   workflow, audit, build, serve and study scripts
 Scripts/dataset_browser/   site sources (JS, CSS, Python helpers)
-src/datahunter/            shared licence and study registry modules
+src/datahunter/            shared modules: workspace, licence registry, study registry
+templates/study/configs/   empty registries a new study starts from
 tests/                     Python and JavaScript tests
-data/, runs/               local workspace (ignored except their README files)
+studies/<id>/              one folder per study (ignored by Git):
+  study.json               marker and creation record
+  actions.jsonl            append-only action log
+  reports/                 tracked Markdown reports
+  configs/                 this study's registries
+  data/                    notices, quarantine, acquisitions, receipts
+  runs/                    intake, download, review and registration runs
+  docs/                    generated catalogue documents and dataset-browser site
 ```
 
 ## How to cite
