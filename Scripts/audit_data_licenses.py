@@ -3,10 +3,12 @@
 Collection never grants permission or rewrites reviewed decisions. No model calls.
 """
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -340,7 +342,7 @@ def render_mode(registry):
               if mode == 'restrictive' else
               'The AI criterion passes unless the intended use is explicitly banned. Silence is not publisher approval.'), '',
              'Overall workflow eligibility also requires underlying access/use rights and valid evidence; provider, privacy and disclosure checks remain in force.', '',
-             f'Use `DATA_HUNTER_LICENSE_MODE={mode}` or audit `--mode {mode}`. Project default: **{registry.policy.get("default", "lenient")}**. Reviewed 30 October 2026.', '',
+             f'Use `DATA_HUNTER_LICENSE_MODE={mode}` or audit `--mode {mode}`. Project default: **{registry.policy.get("default", "lenient")}**. Register as of {registry.policy.get("as_of", "unknown")}.', '',
              '| Resource | AI criterion (local inference) | Local inference workflow | Local embedding workflow | Remote inference workflow | Training workflow | Reason (local inference) |',
              '|---|---|---|---|---|---|---|']
     for r in registry.resources.values():
@@ -357,12 +359,14 @@ def render_mode(registry):
 
 def render(registry):
     clean = lambda value: str(value).replace('|', '\\|').replace('\n', ' ')
-    counts = f"Register: **{len(registry.resources)} resource/component decisions**, **{len(registry.assets)} artifact identities**, covering all **48 catalog IDs**.\n"
+    counts = f"Register: **{len(registry.resources)} resource/component decisions**, **{len(registry.assets)} artifact identities**, covering **{len({i for r in registry.resources.values() for i in r.get('catalog_ids', [])})} catalog IDs**.\n"
     receipt = AUDIT / 'collected_sources.json'
     if receipt.exists():
         pages = json.loads(receipt.read_text())['pages']
         counts += f"Public evidence collection: **{sum(p['status']=='retrieved_not_approved' for p in pages)}/{len(pages)} pages retrieved**; unavailable pages are recorded in the [collection receipt](../data/interim/license_audit/collected_sources.json). Retrieval is not licence approval.\n"
-    lines = [INTRO, counts, f'Table mode: **{registry.mode}**. Both modes are included below for comparison.\n', '| Resource / catalog IDs | Licence evidence | Local inference | Local embeddings | Remote inference / embeddings | Training / redistribution |',
+    # The agent definition lives at the code root; the register is written into the study workspace's docs folder.
+    intro = INTRO.replace('(../agents/dataset-license-review-agent.md)', '(' + os.path.relpath(CODE_ROOT / 'agents/dataset-license-review-agent.md', DOCUMENT.parent) + ')')
+    lines = [intro, counts, f'Table mode: **{registry.mode}**. Both modes are included below for comparison.\n', '| Resource / catalog IDs | Licence evidence | Local inference | Local embeddings | Remote inference / embeddings | Training / redistribution |',
              '|---|---|---|---|---|---|']
     for resource in registry.resources.values():
         states = {op: registry._decision(resource['id'], op)['state'] for op in OPERATIONS}
@@ -373,8 +377,12 @@ def render(registry):
                     label('remote_inference') + ' / ' + label('remote_embedding'),
                     label('training') + ' / ' + label('redistribution')])) + ' |')
     lines.append(FOOTER)
+    # A revised manual decision keeps the superseded resource under the same display name: suffix every
+    # member of such a collision with its resource id so each section heading (and HTML anchor) is unique.
+    repeated = {name for name, n in Counter(r['name'] for r in registry.resources.values()).items() if n > 1}
     for resource in registry.resources.values():
-        lines.extend(['### ' + resource['name'], '',
+        heading = resource['name'] + (' (' + resource['id'] + ')' if resource['name'] in repeated else '')
+        lines.extend(['### ' + heading, '',
                       '- **Reason if blocked:** ' + resource['reason'] + '.',
                       ('- **Conditions:** ' + ' '.join(resource.get('conditions', []))).rstrip(),
                       '- **AI-specific evidence assessment:** ' + resource.get('ai_review_note', 'Not recorded.'),
