@@ -17,7 +17,7 @@ import sys
 
 CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CODE_ROOT / 'src'))
-from datahunter.workspace import workspace_root
+from datahunter.workspace import workspace_root, require_workspace
 ROOT = workspace_root(default=CODE_ROOT)
 from datahunter.data_rights import LicenseRegistry, OPERATIONS, _read
 from datahunter.research_studies import default_study, normalize as normalize_study, registered as registered_study, fingerprint as study_fingerprint, append_log as append_study_log
@@ -290,6 +290,7 @@ def review(path, apply=False, root=ROOT):
     return result
 
 if __name__ == '__main__':
+    require_workspace(ROOT)  # a clear message instead of a missing-file error when no study is active
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--request', required=True, type=Path)
     parser.add_argument('--apply', action='store_true', help='Record the supplied human decision after validation.')

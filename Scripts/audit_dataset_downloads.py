@@ -24,7 +24,7 @@ from public_resources import contained, digest, write_json
 
 CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CODE_ROOT / 'src'))
-from datahunter.workspace import workspace_root
+from datahunter.workspace import workspace_root, require_workspace
 ROOT = workspace_root(default=CODE_ROOT)
 COLLECTION = ROOT / 'data/raw/public_reference_collection'
 BASE = ROOT / 'data/acquisitions'
@@ -287,7 +287,8 @@ def main():
         if item and item.get('mcp_evidence') == 'configs/mcp/all_dataset_resources.json' and item.get('commit'):
             metadata = json.loads((ROOT / item['mcp_evidence']).read_text())
             git_checks.append({'id': item['id'], **git_archive_check(ROOT / record['path'], item, metadata)})
-    prepared = json.loads((COLLECTION / 'prepared/metadata/manifest.json').read_text())
+    prepared_manifest = COLLECTION / 'prepared/metadata/manifest.json'  # written by the validator; absent in a new study
+    prepared = json.loads(prepared_manifest.read_text()) if prepared_manifest.exists() else {'files': []}
     changed_prepared = [r['path'] for r in prepared['files'] if digest(COLLECTION / 'prepared' / r['path']) != r['sha256']]
     results = {r['id']: r for r in receipt['results']}
     if receipt_stale:
@@ -357,4 +358,5 @@ def main():
 
 
 if __name__ == '__main__':
+    require_workspace(ROOT)  # a clear message instead of a missing-file error when no study is active
     raise SystemExit(main())

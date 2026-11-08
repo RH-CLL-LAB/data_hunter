@@ -28,7 +28,7 @@ from public_resources import contained, digest, write_json
 
 CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CODE_ROOT / 'src'))
-from datahunter.workspace import workspace_root
+from datahunter.workspace import workspace_root, require_workspace
 ROOT = workspace_root(default=CODE_ROOT)
 MANIFEST = ROOT / 'configs/research_resources.json'
 LOCK = ROOT / 'configs/research_resources.lock.json'
@@ -380,4 +380,5 @@ def main():
 
 
 if __name__ == '__main__':
+    require_workspace(ROOT)  # a clear message instead of a missing-file error when no study is active
     raise SystemExit(main())

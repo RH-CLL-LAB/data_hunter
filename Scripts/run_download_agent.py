@@ -19,7 +19,7 @@ CODE_ROOT=Path(__file__).resolve().parents[1]
 MAX_DATASET_BYTES=20_000_000_000
 sys.path.insert(0,str(CODE_ROOT/'Scripts'))
 sys.path.insert(0,str(CODE_ROOT/'src'))
-from datahunter.workspace import workspace_root
+from datahunter.workspace import workspace_root, require_workspace
 ROOT=workspace_root(default=CODE_ROOT)
 import acquire_research_resources as acquisition
 from datahunter.data_rights import LicenseRegistry
@@ -218,5 +218,6 @@ def run(instructions_path,execute=False,root=ROOT):
 
 
 if __name__=='__main__':
+    require_workspace(ROOT)  # a clear message instead of a missing-file error when no study is active
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--instructions',required=True,type=Path);p.add_argument('--execute',action='store_true',help='Execute eligible reviewed jobs; default is dry run')
     args=p.parse_args();run(args.instructions,args.execute)

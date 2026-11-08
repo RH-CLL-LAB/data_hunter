@@ -26,7 +26,7 @@ import zipfile
 
 CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CODE_ROOT / 'src'))
-from datahunter.workspace import workspace_root, snapshot_path, resolve_snapshot, snapshot_copy_path
+from datahunter.workspace import workspace_root, require_workspace, snapshot_path, resolve_snapshot, snapshot_copy_path
 ROOT = workspace_root(default=CODE_ROOT)
 sys.path.insert(0, str(CODE_ROOT / 'Scripts'))
 from datahunter.data_rights import LicenseRegistry, file_digest
@@ -499,4 +499,5 @@ def main():
 
 
 if __name__ == '__main__':
+    require_workspace(ROOT)  # a clear message instead of a missing-file error when no study is active
     raise SystemExit(main())

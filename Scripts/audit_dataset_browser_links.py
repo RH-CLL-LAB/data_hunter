@@ -15,7 +15,7 @@ import httpx
 
 CODE_ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(CODE_ROOT/'src'))
-from datahunter.workspace import workspace_root
+from datahunter.workspace import workspace_root, require_workspace
 ROOT=workspace_root(default=CODE_ROOT)
 SITE=ROOT/'docs/dataset-browser'
 BASE=ROOT/'data/interim/dataset_browser_links'
@@ -158,4 +158,5 @@ async def run(args):
 
 
 if __name__=='__main__':
+    require_workspace(ROOT)  # a clear message instead of a missing-file error when no study is active
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--reuse',help='Reuse previous URL results and check only new URLs');parser.add_argument('--retry-unresolved',action='store_true');parser.add_argument('--retry-transient',action='store_true');args=parser.parse_args();asyncio.run(run(args))

@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CODE_ROOT / 'src'))
-from datahunter.workspace import workspace_root
+from datahunter.workspace import workspace_root, require_workspace
 ROOT = workspace_root(default=CODE_ROOT)
 from datahunter.data_rights import LicenseRegistry, OPERATIONS, MODES, DataRightsError
 
@@ -430,4 +430,5 @@ def main():
 
 
 if __name__ == '__main__':
+    require_workspace(ROOT)  # a clear message instead of a missing-file error when no study is active
     raise SystemExit(main())

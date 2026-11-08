@@ -31,6 +31,7 @@ class DatasetSelectionTests(unittest.TestCase):
         self.assertEqual(result[0]['records'], 10)
 
 
+    @unittest.skipUnless((ROOT/'configs/dataset_selection.json').is_file(),'needs a study workspace')
     def test_unreviewed_pending_source_remains_unassessed_and_on_hold(self):
         policy = json.loads((ROOT / 'configs/dataset_selection.json').read_text())
         result = selection.judgement({'id': 'UNKNOWN_FUTURE_SOURCE', 'category': 'pending_access',
@@ -38,6 +39,7 @@ class DatasetSelectionTests(unittest.TestCase):
         self.assertEqual(result['workflow_relevance'], 'unassessed')
         self.assertEqual(result['action_priority'], 'P3 / hold')
 
+    @unittest.skipUnless((ROOT/'configs/dataset_selection.json').is_file(),'needs a study workspace')
     def test_action_assignment_is_unambiguous_and_covers_only_registered_ids(self):
         policy = json.loads((ROOT / 'configs/dataset_selection.json').read_text())
         registry = json.loads((ROOT / 'configs/dataset_study_usage.json').read_text())

@@ -29,7 +29,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == 'list':
         active = active_study_id()
-        print(json.dumps({'studies': [{'id': s, 'path': str(study_path(s).relative_to(CODE_ROOT)), 'active': s == active} for s in list_studies()]}, indent=2))
+        rows = []
+        for s in list_studies():
+            marker = json.loads((study_path(s) / 'study.json').read_text())
+            rows.append({'id': s, 'path': str(study_path(s).relative_to(CODE_ROOT)), 'active': s == active, **({'retired_at': marker['retired_at']} if marker.get('retired_at') else {})})
+        print(json.dumps({'studies': rows}, indent=2))
     elif args.command == 'use':
         folder = set_active(args.study_id)
         print(json.dumps({'active_study': args.study_id, 'workspace': str(folder)}))

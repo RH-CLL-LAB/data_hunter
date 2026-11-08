@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 
 CODE_ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(CODE_ROOT/'src'))
-from datahunter.workspace import workspace_root
+from datahunter.workspace import workspace_root, require_workspace
 ROOT=workspace_root(default=CODE_ROOT)
 from datahunter.research_studies import normalize as normalize_study
 MAX_DATASET_BYTES=20_000_000_000
@@ -107,6 +107,7 @@ def launch(path,execute=False,background=False,timeout=3600,root=ROOT):
     print(json.dumps({'run':str(run),'state':job['state'],'codex_launch_requested':job['codex_launch_requested']}));return job
 
 if __name__=='__main__':
+    require_workspace(ROOT)  # a clear message instead of a missing-file error when no study is active
     parser=argparse.ArgumentParser(description=__doc__)
     choice=parser.add_mutually_exclusive_group(required=True);choice.add_argument('--request',type=Path);choice.add_argument('--worker',type=Path)
     parser.add_argument('--execute',action='store_true');parser.add_argument('--background',action='store_true');parser.add_argument('--timeout',type=int,default=3600)
