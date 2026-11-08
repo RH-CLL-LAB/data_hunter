@@ -53,12 +53,13 @@ class IntakeAgentTests(unittest.TestCase):
     def test_default_plan_keeps_request_role_prompt_and_makes_no_model_call(self):
         with patch.object(agent.subprocess,'Popen',side_effect=AssertionError('model must not start')):
             job=agent.launch(self.path,root=self.root)
-        self.assertEqual(job['state'],'planned');self.assertFalse(job['codex_launch_requested'])
+        self.assertEqual(job['state'],'planned');self.assertFalse(job['cli_launch_requested'])
         run=self.root/job['run'];self.assertTrue((run/'prompt.txt').is_file())
         self.assertEqual(json.loads((run/'request.json').read_text()),self.request)
-        command=job['command'];self.assertIn('workspace-write',command)
-        self.assertNotIn('--dangerously-bypass-approvals-and-sandbox',command)
-        self.assertEqual(command[-1],'-')
+        command=job['command']
+        if job['cli']=='codex':self.assertIn('workspace-write',command);self.assertEqual(command[-1],'-')
+        else:self.assertEqual(job['cli'],'claude');self.assertIn('acceptEdits',command);self.assertIn('-p',command)
+        for flag in ['--dangerously-bypass-approvals-and-sandbox','--dangerously-skip-permissions']:self.assertNotIn(flag,command)
 
     def test_background_requires_execute_and_preserves_strict_mode(self):
         with self.assertRaisesRegex(ValueError,'background_requires_explicit_execute'):
@@ -74,7 +75,7 @@ class IntakeAgentTests(unittest.TestCase):
     def test_missing_cli_blocks_execution(self):
         with patch.object(agent.shutil,'which',return_value=None),patch.object(agent.subprocess,'Popen',side_effect=AssertionError('must not start')):
             job=agent.launch(self.path,execute=True,root=self.root)
-        self.assertEqual(job['state'],'blocked_cli_missing');self.assertFalse(job['codex_launch_requested'])
+        self.assertEqual(job['state'],'blocked_cli_missing');self.assertFalse(job['cli_launch_requested'])
 
     def test_worker_records_failure_without_claiming_registration(self):
         job=agent.launch(self.path,root=self.root);run=self.root/job['run']

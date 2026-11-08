@@ -60,7 +60,7 @@
   const common={schema_version:spec.schema_version,kind:spec.kind,catalogue_sha256:spec.catalogue_sha256,created_at:spec.created_at,
    ...(spec.research_study?{research_study:JSON.stringify(spec.research_study)}:{}),license_mode:spec.license_mode,download_scope:spec.download_scope,download_requested:spec.download_requested,max_bytes_per_dataset:spec.max_bytes_per_dataset,max_bytes_per_artifact:spec.max_bytes_per_artifact,max_total_bytes:spec.max_total_bytes,
    technical_risk_acknowledgements:JSON.stringify(spec.technical_risk_acknowledgements),agent_definition:spec.agent_definition,instructions:spec.instructions,
-   codex_handoff:'Attach this CSV in a Claude Code or Codex session in this repository. Use '+spec.agent_definition+'. Honour the saved download_scope and licensing/limits; keep logs, verify completeness against the requested scope, and report manual registration/permission actions.'};
+   agent_handoff:'Attach this CSV in a Claude Code or Codex session in this repository. Use '+spec.agent_definition+'. Honour the saved download_scope and licensing/limits; keep logs, verify completeness against the requested scope, and report manual registration/permission actions.'};
   const fields=['id','name',...Object.keys(common),'priority','download_status','obtained_on','obtained_first','obtained_last','obtained_held_by','obtained_unknown_files','access','access_url','source_urls','terms_status','terms_urls','minimal_package','missing_components','retained_bytes','provider_size_bytes','provider_size_scope'];
   return exportFields(rows.map(row=>({...row,...common})),fields);
  }

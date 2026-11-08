@@ -11,7 +11,7 @@ says otherwise; none calls a model.
 | `init_empty_workspace.py` | Write the empty validation and selection reports, receipts and catalogue documents for a workspace with no sources. Refuses to run once datasets are registered. |
 | `register_research_study.py` | Validate and register an exported study JSON (`--request FILE --apply`): a new study gets its own folder `studies/<id>/` with empty registries and becomes active. `--remove STUDY_ID --apply` retires a study (folder kept). Appends to the study's action log. Grants no data permission. |
 | `log_study_action.py` | Append one action to a registered study's `actions.jsonl`. |
-| `run_dataset_intake_agent.py` | Prepare a single-source or discovery intake request and prompt for the intake agent; optionally launch a Codex CLI job with `--execute`. |
+| `run_dataset_intake_agent.py` | Prepare a single-source or discovery intake request and prompt for the intake agent; optionally launch the agent with `--execute`: Claude Code when installed, otherwise the Codex CLI. |
 | `run_download_agent.py` | Execute the download task saved by the site (CSV or JSON); dry run by default; honours scope, licence mode and byte limits. Network access when executing. |
 | `acquire_research_resources.py` | Hash-verified acquisition of reviewed resources into the study's `data/acquisitions/`. Network access. |
 | `review_dataset_license.py` | Validate and register a manual licence decision saved by a dataset page. |
