@@ -46,7 +46,7 @@
  if(note&&location.protocol==='file:')note.textContent+=' For reliable study switching across pages, use the HTTP preview described in the reading guide; local-file browser storage can be isolated per page.';
  // A study with nothing registered yet is told where its dataset search starts.
  if(note&&api.current().id!==api.defaultId()){const s=api.current();const empty=!Object.keys(s.dataset_annotations||{}).length&&!(s.dataset_ids||[]).length&&!(s.reports||[]).length;
-  if(empty){note.append(' No dataset search is registered for this study yet; start one on ');const link=document.createElement('a');link.href=base+'add-datasets.html?discover=1&study='+encodeURIComponent(s.id);link.textContent='Add datasets';note.append(link,'.');}}
+  if(empty){note.append(' No dataset search is registered for this study yet; start one on ');const link=document.createElement('a');link.href=base+'add-datasets.html?discover=1&study='+encodeURIComponent(s.id);link.textContent='Search datasets';note.append(link,'.');}}
  if(note&&api.current().shadowed_registered)note.textContent+=' This browser holds a draft of this study whose brief differs from the registered one, so registered reports, log entries and permissions are not shown. Export the draft to update the registration, or archive it to see the registered study.';
  const unsaved=()=>api.persisted()?'':' Browser storage is unavailable, so this was not kept: export the study before leaving.';
  const form=document.querySelector('[data-new-study-form]');

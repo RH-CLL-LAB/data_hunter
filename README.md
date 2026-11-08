@@ -131,7 +131,7 @@ for a study without sources the build creates the empty state itself.
    register it with `Scripts/register_research_study.py --request study.json
    --apply`: this creates `studies/<id>/` with empty registries and makes it
    the active study.
-2. **Search for its datasets**: the Add datasets page generates a licence-first
+2. **Search for its datasets**: the Search datasets page generates a licence-first
    discovery prompt; pass it to Claude Code or Codex with
    `agents/dataset-intake-agent.md`. The agent retains public licence notices
    with URL, date and hash, adds entries and annotations, and downloads no data.
