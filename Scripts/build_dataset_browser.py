@@ -1010,7 +1010,8 @@ def build():
               'privacy':{'patient_rows_embedded':False,'dataset_copies':0,'model_calls':0,'network_dependencies':0},'local_links_checked':True,
               'project_software_license':{'status':'declared_file' if declared else 'not_declared_in_checked_working_tree','path':str(declared.relative_to(CODE_ROOT)) if declared else None}}
     manifest_path.write_text(json.dumps(manifest,indent=2)+'\n')
-    print(json.dumps({'html_overview':str((OUT/'index.html').relative_to(ROOT)),'datasets':len(records),'pages':len(pages),'internal_links':'verified'},indent=2))
+    overview=OUT/'index.html';shown=overview.relative_to(CODE_ROOT) if overview.is_relative_to(CODE_ROOT) else overview
+    print(json.dumps({'workspace':str(ROOT.relative_to(CODE_ROOT) if ROOT.is_relative_to(CODE_ROOT) else ROOT),'html_overview':str(shown),'datasets':len(records),'pages':len(pages),'internal_links':'verified'},indent=2))
     return manifest
 
 
