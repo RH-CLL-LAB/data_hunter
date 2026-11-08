@@ -1,0 +1,221 @@
+{
+ "priority": {
+  "group": "Priority assigned by the workspace’s default study, shown for every study as a baseline. Your own study’s ratings are under “This research study”.",
+  "options": {
+   "P1": "Work to start next. Example: prepare an important lab-mapping reference or resolve one CLL access route. A P1 dataset can still be incomplete.",
+   "P2": "Potentially useful after we identify a specific gap. Example: another hospital dataset might add a new schema. We should establish that need before downloading it.",
+   "Maintain": "Keep using the existing, approved subset for its recorded purpose. No expansion or new acquisition is currently prioritized.",
+   "P3 / hold": "Defer acquisition for now. The source may be useful later, but it does not address the current benchmark's most important gaps. This does not mean the dataset is poor quality."
+  }
+ },
+ "ready": {
+  "group": "Whether the currently held files can support the recorded development task. This is separate from whether a paper used the source, and from independent clinical benchmark validity.",
+  "options": {
+   "ready_scoped": "A specific set of prepared source files passed the recorded file, table-reading and local AI permission checks. Example: the MIMIC demo source subset. It does not clear the entire parent database or certify clinical correctness.",
+   "needs_preparation_or_permissions": "Some files are held, but something must be resolved before the intended use: an adapter, source/reference separation, labels, permissions or another preparation step. Open the dataset's problems section for the actual blocker.",
+   "incomplete": "A necessary part is missing, such as a dictionary, target list, expert reference, patient file or access agreement. This does not necessarily mean the files we have are damaged.",
+   "reference_only": "Useful supporting material is held, such as terminology, schema documentation or conversion code. It is not a ready participant-level extraction input.",
+   "not_appropriate": "Excluded from the current primary clinical benchmark objective, for example because it is redundant or tests a different task. It may still have value elsewhere."
+  }
+ },
+ "available": {
+  "group": "Which files the project already holds, shared by every study, and when they were obtained. Holding a file is not permission to use it; see “Permission for intended local AI use”. Discovery downloads nothing.",
+  "options": {
+   "selected subset held": "The selected data or reference files are held and hash-verified. This is not a claim that the full provider release is present.",
+   "partial package": "Some relevant parts are present, while others are missing. Example: prepared clinical tables are held, but original workbooks or required reference mappings are absent.",
+   "metadata / code / reference only": "We have descriptions, dictionaries, code, standards or reference material, rather than a complete participant-data package. Such material can still be valuable for metadata mapping.",
+   "not acquired": "No usable dataset payload is assigned to this entry in the verified inventory. A paper or access webpage may still be known."
+  }
+ },
+ "access": {
+  "group": "How new or full access would be obtained. Some entries combine an open demo with a controlled full database; a registration flag can therefore coexist with a ready demo subset.",
+  "options": {
+   "public_no_registration": "The recorded source route is public and does not require an account. Its licence and AI-use conditions still apply.",
+   "registration": "An account, training, study approval or agreement is required for new/full access. Example: full eICU access requires credentials even though its demo is open.",
+   "owner": "Contact the authors, institution or data owner for permission or a shareable package. Example: request a small expert-labelled dictionary rather than patient records.",
+   "public_review": "A public download or repository is a lead, but the exact files, suitability or conditions need review before acquisition.",
+   "unresolved": "The exact access route has not been established adequately. Do not interpret this as either open access or a confirmed prohibition."
+  }
+ },
+ "benchmark": {
+  "group": "What published studies report doing with the resource or its source family. This does not prove that our exact downloaded release or demo was evaluated in that paper.",
+  "options": {
+   "mapping": "Reported use in matching variables, clinical terms, schemas or ontologies. Example: a source dictionary mapped to expert-selected target concepts. Read the linked study relationship to check the exact version and scope.",
+   "extraction": "Reported use in finding or retrieving clinical information from source records, such as evaluating an EHR extraction agent. This does not certify our own extraction workflow.",
+   "prediction": "Reported use in predicting outcomes or evaluating learned patient/table representations. A prediction benchmark is useful context, but is different from a mapping benchmark with expert reference answers.",
+   "context": "The register contains source, related-method or other contextual evidence, without a classified mapping/extraction/prediction evaluation use. A citation alone is not counted as benchmark validation."
+  }
+ },
+ "kind": {
+  "group": "The broad category assigned in the project inventory. Combine it with availability to distinguish a source's subject matter from what is actually downloaded.",
+  "options": {
+   "clinical_sources": "Clinical source tables or related selected clinical exports. They may contain patient, visit, laboratory or treatment information. Held scope varies by entry.",
+   "mapping_references": "Variable dictionaries, term lists, reference mappings or related benchmark material. Many mapping tasks can be tested without patient rows.",
+   "synthetic_controls": "Generated data or software-control packages used to test processing behavior. Successful tests here do not establish validity on real clinical records.",
+   "tabular_controls": "General tabular prediction inputs, such as ARFF tables. They can stress table-reading behavior but usually lack independent harmonization/extraction reference answers.",
+   "standards_and_methods": "Standards, terminology, target catalogues, transformation recipes or ETL code. These support workflow components rather than serving as complete patient-level benchmarks.",
+   "metadata_only": "Documentation or study metadata is held. The participant package or complete paired analysis input is absent.",
+   "pending_access": "A candidate requiring access or an owner request. The intended package still needs checking; this category does not imply that any records are held.",
+   "excluded": "An excluded or unsuitable control for the current primary clinical benchmark. Check the dataset record for the reason."
+  }
+ },
+ "license": {
+  "group": "Licence families found in source-bound evidence, not permissions granted by this browser. A resource can have several component licences and unresolved parts. Software licensing does not automatically cover data.",
+  "options": {
+   "attribution": "A recorded data component uses an attribution licence such as CC BY. Credit and other applicable conditions remain required; separate vocabulary or provider conditions may still apply.",
+   "sharealike": "A recorded component uses ODbL or related share-alike terms. Attribution and obligations for adapted databases need review before publishing derived datasets.",
+   "permissive": "An applicable recorded data component uses MIT, Apache or BSD-style terms. Software-only licences are excluded from this filter, and unresolved inherited terms remain unknown.",
+   "public_domain": "Recorded evidence identifies CC0 or public-domain material for a component. This does not extend to separately copyrighted terminology or other files in the package.",
+   "custom": "The component has source-specific or terminology terms, such as LOINC/UCUM conditions or instrument restrictions. Read the exact rules rather than assuming a standard open licence.",
+   "dua": "A public provider/data-use agreement has been screened for the access route. It is not a signed project agreement or permission to use the data. The same entry may also be marked unresolved.",
+   "unknown": "The exact data/component grant is missing, unresolved or not tied to reviewed file identities. A paper's or repository's software licence cannot fill that gap.",
+   "restricted_cc": "The recorded Creative Commons terms include noncommercial or no-derivatives restrictions. Read the exact licence and intended operation; this is not plain CC BY or blanket AI permission."
+  }
+ },
+ "work": {
+  "group": "Specific kinds of work remaining. These flags can overlap. A source can be ready for narrow development while still needing independent benchmark reference review.",
+  "options": {
+   "preparation": "Prepare consistent input tables or a reader (adapter) for the provider's file format. Separate expected answers from source columns, and finish the recorded preparation or permission steps.",
+   "missing": "Obtain or clarify a missing component, such as an expert answer set, dictionary, candidate release or necessary clinical table.",
+   "rights": "The local AI permission check for the files associated with this entry is not allowed in the recorded snapshot. This can be missing rights/evidence rather than an explicit AI ban; an exact prepared subset may have a separate outcome.",
+   "registration": "Complete the justified account, training or approval route for new/full access. This does not mean every held demo file needs registration.",
+   "owner": "Ask an author or data owner for terms, a minimal shareable package or an authorized evaluation arrangement.",
+   "reference": "Review expert answers and freeze an independent test split before claiming benchmark performance. Gold answers must not enter discovery prompts or tuning inputs.",
+   "format": "A retained artifact has a recorded format problem, explicit issue or outstanding format review. Report the finding first; it is not permission to silently alter provider data."
+  }
+ },
+ "relevance": {
+  "group": "Relevance judged by the workspace’s default study, shown for every study as a baseline. Your own study’s ratings are under “This research study”.",
+  "options": {
+   "high": "Directly supports a target task, such as clinical variable mapping, blood-laboratory context or an expert reference benchmark.",
+   "moderate": "Potentially supports a useful component or a conditional follow-up. A specific new capability should justify preparation or acquisition.",
+   "low": "Limited fit for the current primary clinical benchmark, such as a generic control or a different data modality.",
+   "unassessed": "Source-specific evidence is not yet sufficient to establish useful additional capability. Inspect the metadata before deciding to download."
+  }
+ },
+ "cll": {
+  "group": "How the source relates to chronic lymphocytic leukaemia (CLL) and the CLL-TIM task. A CLL cohort does not necessarily contain the required blood tests, dates or targets.",
+  "options": {
+   "direct": "A CLL study or cohort source. Verify its actual laboratory, treatment and time coverage before using it for CLL-TIM validation.",
+   "indirect": "Supports laboratory names, units, clinical extraction or related context, but is not itself an established CLL-TIM validation cohort.",
+   "other": "No direct CLL-TIM cohort relationship is established. The resource may still be useful for general harmonization."
+  }
+ },
+ "format": {
+  "group": "File formats actually present among the associated retained or prepared artifacts. An archive or document is not evidence of usable patient rows inside it.",
+  "options": {
+   "csv": "Delimited tables such as CSV/TSV, including their compressed forms. Check the row, column, type and missing-value profiles before workflow use.",
+   "excel": "Excel workbooks. They may have multiple sheets, merged headings, legends or formatting that an adapter must handle explicitly.",
+   "json": "JSON, JSONL or NDJSON files. These can contain nested structures, metadata or mappings rather than flat clinical tables.",
+   "xml": "XML or FHIR-related files. Structured records may require a format-specific reader and a verified mapping to the workflow's inputs.",
+   "clinical_binary": "Native statistical formats such as SAS, Stata, SPSS or R data files. The correct reader, variable labels and missing-value meanings need checking.",
+   "arff": "Attribute-Relation File Format, commonly used by ML benchmarks. Declared attributes and prediction targets are different from a harmonization reference answer set.",
+   "archive": "A ZIP, tarball or compressed package is held. This filter does not certify the contents or imply that all members have been prepared.",
+   "document": "PDF, Word, text or other documentation. This may include dictionaries, licences or expert references; it is not automatically participant data.",
+   "code": "Scripts, notebooks or queries are held. Code can document a transformation, but is not the same as having its source data or validated output.",
+   "ontology": "An ontology or terminology representation, such as OWL, OBO or RDF. Exact release and component terms matter for candidate matching.",
+   "other": "A retained format outside the categories above. Open the artifact's format profile to see its actual type and validation limits.",
+   "not_held": "No associated retained or prepared file format is available for this entry. A provider may advertise formats that we have not acquired."
+  }
+ },
+ "size_retained": {
+  "group": "Size of associated retained source artifacts, including compressed archives, documentation or code. This is not the provider's full database size. Lower bounds are inclusive and upper bounds exclusive.",
+  "options": {
+   "lt1": "Less than 1 MiB (1,048,576 bytes). A small dictionary or mapping reference can be very useful even at this size.",
+   "1to10": "At least 1 MiB and less than 10 MiB of associated retained artifacts.",
+   "10to100": "At least 10 MiB and less than 100 MiB of associated retained artifacts.",
+   "100to1024": "At least 100 MiB and less than 1 GiB (1,024 MiB) of associated retained artifacts.",
+   "gte1024": "At least 1 GiB of associated retained artifacts. Size alone is not a measure of usefulness or participant count.",
+   "unknown": "No retained size is established for this entry. Unknown is kept separate from zero; tick it together with other bands if you want both."
+  }
+ },
+ "size_prepared": {
+  "group": "Size of prepared representations associated with the entry. These copies are counted separately from retained provider artifacts. Lower bounds are inclusive and upper bounds exclusive.",
+  "options": {
+   "lt1": "Less than 1 MiB in prepared representations, such as a small normalized dictionary or source-only table.",
+   "1to10": "At least 1 MiB and less than 10 MiB in prepared representations.",
+   "10to100": "At least 10 MiB and less than 100 MiB in prepared representations.",
+   "100to1024": "At least 100 MiB and less than 1 GiB in prepared representations.",
+   "gte1024": "At least 1 GiB in prepared representations. This is a storage measure, not a benchmark-quality score.",
+   "unknown": "No prepared size is established. This usually means the needed representation has not been prepared or assigned, rather than that the provider dataset is empty."
+  }
+ },
+ "size_provider": {
+  "group": "Size of a specific provider-advertised artifact when verified evidence is recorded, including not-yet-downloaded packages. This is not automatically the full database, minimal requested subset or extra storage needed.",
+  "options": {
+   "lt1": "A verified advertised artifact smaller than 1 MiB. Its exact package scope and evidence are recorded in the dataset details.",
+   "1to10": "A verified advertised artifact at least 1 MiB and smaller than 10 MiB. This may be metadata rather than participant records.",
+   "10to100": "A verified advertised artifact at least 10 MiB and smaller than 100 MiB. Its provider package may still need file-level and licence review before download.",
+   "100to1024": "A verified advertised artifact at least 100 MiB and smaller than 1 GiB. This is not an estimate of a full cohort unless the recorded scope explicitly says so.",
+   "gte1024": "A verified advertised artifact of at least 1 GiB. Check the release, file list, relevance and permitted minimal subset before considering a large transfer.",
+   "unknown": "No provider/package byte size is verified in the current evidence. This is unknown, not zero. Request the exact file manifest rather than estimating from a paper or dictionary."
+  }
+ },
+ "license_status": {
+  "group": "Permission is separate from download completeness, licence family and technical readiness. Approved means a recorded exact local AI scope passes the lenient snapshot; source review alone cannot clear unidentified inputs.",
+  "options": {
+   "approved": "The documented local source scope passed its recorded local inference/embedding checks. Read the exact file scope and conditions; other releases and remote providers remain separate.",
+   "source_reviewed": "A manual source review has been registered, but exact held input identities are not yet cleared. Plan a reviewed download and bind its delivery before inference.",
+   "review_required": "Underlying rights, evidence, release coverage or AI permission remain unresolved. Read the attached notice and record a manual review or seek clarification.",
+   "prohibited": "An applicable recorded restriction blocks the intended local AI operation. A manual click cannot override the prohibition or replace a missing agreement."
+  }
+ },
+ "project_relevance": {
+  "group": "Your relevance assessment is scoped to the active research project, independent of the default study’s baseline ratings.",
+  "options": {
+   "high": "Highly useful for this research question, as annotated by the user or reviewed intake. This is not a licence or benchmark-quality clearance.",
+   "moderate": "Potentially useful for some aspects of this study, with the reasoning retained in the per-study annotation.",
+   "low": "Limited fit for the current research study; this does not remove it from the shared catalogue or other projects.",
+   "unassessed": "No relevance annotation has been made for this research study. Unknown relevance must not be treated as high or low."
+  }
+ },
+ "project_role": {
+  "group": "The intended use is a study-specific annotation. Benchmark candidate does not mean independently validated benchmark-ready.",
+  "options": {
+   "development": "Proposed for workflow development or optimization in this study, separately from independent held-out evaluation.",
+   "benchmark": "Proposed benchmark candidate for this study; rights, completeness, reference correctness and frozen splits still need independent checks.",
+   "reference": "Useful as documentation, context, dictionaries or supporting reference material for this study.",
+   "exclude": "The user marked it outside this study’s selection. Files and historical evidence remain in the shared catalogue.",
+   "unassessed": "No intended-role annotation has been recorded for this research study yet."
+  }
+ },
+ "project_tags": {
+  "group": "Topic tags come from dataset annotations for this research study. Custom tags appear after saving an annotation; several tags within this group match any selected tag.",
+  "options": {
+   "untagged": "No topic tag has been saved for this dataset in the current research project."
+  }
+ },
+ "study_shortlist": {
+  "group": "Shortlists are separate for each research project and can be exported with its brief and annotations. Saving a shortlist grants no download or data-use rights.",
+  "options": {
+   "shortlisted": "This catalogue ID is saved in the active research study’s shortlist in this browser or imported profile.",
+   "not_shortlisted": "This catalogue ID has not been saved in the active research study’s shortlist."
+  }
+ },
+ "review_route": {
+  "group": "This describes how licensing was reviewed or what remains to be done. Always combine it with the separate permission-status filter; an old manual decision can expire or record a prohibition.",
+  "options": {
+   "evidence_reviewed": "The recorded exact scope passes its licensing evidence checks, with no manual-review importer record for this study. This is not an automated legal guarantee.",
+   "manual_required": "The current intended study use needs licence evidence, manual interpretation or provider clarification. It is not proof of an explicit AI ban.",
+   "manual_recorded": "A human decision was registered for this study. Read its status and scope: it may be an approval, a prohibition or a request for clarification."
+  }
+ },
+ "blocker": {
+  "group": "Why an entry is not ready, shown under its readiness state. Several reasons can apply. Open the dataset’s “Problems & next steps” for the exact wording.",
+  "options": {
+   "prep_rights": "The project’s local AI permission check for the files associated with this entry is not allowed in the recorded snapshot: rights or evidence are missing, or a condition is unresolved. Downloading does not change this.",
+   "prep_reference": "A candidate benchmark whose expected answers still need independent reference review and a frozen train/test split before any evaluation claim.",
+   "prep_control": "Held as a software or tabular control resource; it is not independent clinical gold and cannot certify clinical mapping or extraction correctness.",
+   "prep_version": "The held files differ from the version, counts or snapshot described in the source paper or provider documentation, or a recorded component is absent or empty.",
+   "prep_format": "A held file failed the recorded structure check or has format issues that a reader or adapter must resolve before use.",
+   "prep_adapter": "The recorded notes ask for a reader/adapter, sheet- or column-level separation of references from source values, or a reconciliation step before the task can run.",
+   "prep_access": "A registration, data-use agreement or owner approval is still needed for the files this task requires.",
+   "inc_access": "A registration, credentialed access, data-use agreement, author request or institutional approval is outstanding according to the access route or the recorded notes.",
+   "inc_licence": "The applicable licence or terms are not stated, not retrievable, not verified or not yet reviewed for this study; rights cannot be inferred.",
+   "inc_reference": "A dictionary, target list, expert labels, gold mappings, splits or another reference component is missing according to the recorded notes.",
+   "inc_records": "Participant files, patient-level records, cohort snapshots or the actual source tables are not held; public dictionaries do not substitute for them.",
+   "inc_identity": "Exact files, hashes, manifest, size, version or provenance are not verified, or overlaps with other entries are not reconciled.",
+   "inc_other": "The recorded gap did not match any of the categories above; read the dataset's problem notes for the specific missing part."
+  }
+ }
+}

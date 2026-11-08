@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-11-08",
+  "purpose": "Empty registry in the code-only release; filled by the workflow scripts.",
+  "raw_images_enabled": false,
+  "broad_benchmarks_enabled": false,
+  "cms_samples": [],
+  "clinical_openml": {},
+  "permission": "Empty registry in the code-only release; filled by the workflow scripts.",
+  "decisions": []
+}

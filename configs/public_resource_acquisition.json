@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-11-08",
+  "scope": "Empty registry in the code-only release; filled by the workflow scripts.",
+  "phases": {},
+  "resources": [],
+  "original_23_catalog": [],
+  "automatic_restore_lock": "configs/public_resources.lock.json",
+  "new_acquisitions_enabled": false,
+  "reason": "Empty registry in the code-only release; filled by the workflow scripts.",
+  "completed_batches": [],
+  "preparation": {}
+}

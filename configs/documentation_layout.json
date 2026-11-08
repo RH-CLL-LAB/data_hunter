@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "effective_on": "2026-11-08",
+  "canonical_dataset_documents": [],
+  "required_operational_policy": "docs/DATA_LICENSES_AND_AI_USE.md",
+  "generated_dataset_html": {
+    "entry_point": "docs/dataset-browser/index.html",
+    "explorer": "docs/dataset-browser/catalogue.html",
+    "download_guide": "docs/dataset-browser/downloads.html",
+    "generator": "Scripts/build_dataset_browser.py",
+    "ownership_manifest": "docs/dataset-browser/build-manifest.json",
+    "role": "Generated offline HTML views of the maintained Markdown/registry evidence, not additional hand-maintained catalogues."
+  },
+  "retired_documents": [],
+  "retired_report_generators": [],
+  "recovery_manifest": "data/interim/documentation_cleanup/2026-11-05/before_manifest.json",
+  "rules": [],
+  "replacement_links": {}
+}

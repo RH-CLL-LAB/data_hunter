@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-11-08",
+  "scope": "Empty registry in the code-only release; filled by the workflow scripts.",
+  "evidence": "",
+  "rules": [],
+  "external_fragments": []
+}

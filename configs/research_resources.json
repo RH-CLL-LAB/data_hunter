@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-11-08",
+  "scope": "Empty registry in the code-only release; filled by the workflow scripts.",
+  "resources": [],
+  "downstream_studies": [],
+  "updated_at": "2026-11-08"
+}

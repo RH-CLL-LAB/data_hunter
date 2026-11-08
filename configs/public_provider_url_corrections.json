@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "observed_on": "2026-11-08",
+  "evidence": "Empty registry in the code-only release; filled by the workflow scripts.",
+  "corrections": []
+}

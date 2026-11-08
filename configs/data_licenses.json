@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-11-08",
+  "default": "lenient",
+  "review_interval_days": 30,
+  "scope": "local workflow inference/embedding only; remote providers, training and redistribution require separate review",
+  "resources": [],
+  "modes": {
+    "restrictive": "AI-specific approval for the intended operation must be explicit; broad grants alone do not qualify.",
+    "lenient": "Only an explicit applicable AI prohibition fails the AI criterion; access/use rights, evidence and conditions remain separate requirements."
+  }
+}

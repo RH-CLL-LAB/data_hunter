@@ -1,0 +1,40 @@
+# Docker Compose services for Data Hunter.
+#
+#   docker compose run --rm build-test        rebuild the site and run all tests (no network)
+#   docker compose up site                    serve Data Hunter at http://127.0.0.1:8767/
+#   docker compose run --rm download-agent ... run a reviewed acquisition job (network enabled)
+#
+# Every service mounts this checkout at /app, so registries, receipts and acquired
+# holdings are used in place. Containers run as your user id so files they write
+# stay yours.
+
+x-base: &base
+  build: .
+  image: data-hunter-env
+  working_dir: /app
+  user: "${UID:-1000}:${GID:-1000}"
+  volumes:
+    - .:/app
+  environment:
+    DATA_HUNTER_LICENSE_MODE: ${DATA_HUNTER_LICENSE_MODE:-lenient}
+
+services:
+  # Reproducible build and test run; nothing can leave the container.
+  build-test:
+    <<: *base
+    network_mode: none
+
+  # Static site only; the repository is mounted read-only.
+  site:
+    <<: *base
+    volumes:
+      - .:/app:ro
+    ports:
+      - "127.0.0.1:8767:8767"
+    command: python -m http.server 8767 --bind 0.0.0.0 --directory docs/dataset-browser
+
+  # The one job that needs the network: reviewed, hash-verified acquisition into data/.
+  download-agent:
+    <<: *base
+    profiles: [acquire]
+    command: python Scripts/run_download_agent.py --help

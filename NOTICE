@@ -1,0 +1,28 @@
+Data Hunter
+Copyright 2026 Nikola Tom
+
+Author: Nikola Tom
+Group leader: Carsten Utoft Niemann
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Citation
+--------
+If you use Data Hunter or results produced with it in research, teaching or
+software, please cite the authors and the tool. A machine-readable citation is
+provided in CITATION.cff; a plain form is:
+
+  Tom N, Niemann CU. Data Hunter: licence-first exploration, validation,
+  selection and download of research datasets. 2026.
+  https://github.com/RH-CLL-LAB/data_hunter
+
+This attribution notice must be retained in redistributions and derivative
+works as described in Section 4(d) of the License.
+
+Scope
+-----
+The License covers the code, configuration and documentation in this
+repository. It does not cover third-party datasets, data dictionaries,
+terminologies, licence notices, publications or other materials that the tool
+catalogues, retrieves or references. Those remain under their own licences and
+access conditions, which must be checked separately before use.

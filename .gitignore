@@ -1,0 +1,32 @@
+# Local workspace: acquired sources, receipts, run archives, logs, credentials.
+.env
+.env.*
+*.pem
+*.key
+/data/raw/
+/data/incoming_manual/
+/data/quarantine/
+/data/interim/
+/data/processed/
+/data/datasets/
+/runs/*
+!/runs/README.md
+/logs/
+*.log
+/tmp/
+/outputs/
+/output/*
+
+# Python environments, caches, build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Editors and OS files
+.DS_Store
+.idea/
+.vscode/
+/.claude/

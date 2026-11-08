@@ -1,0 +1,2 @@
+# Published documents are binary artifacts, not line-oriented text patches.
+*.pdf binary

@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "scope": "Empty registry in the code-only release; filled by the workflow scripts.",
+  "files": []
+}

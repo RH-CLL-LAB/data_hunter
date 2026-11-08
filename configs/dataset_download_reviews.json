@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-11-08",
+  "scope": "Empty registry in the code-only release; filled by the workflow scripts.",
+  "method": "Empty registry in the code-only release; filled by the workflow scripts.",
+  "metadata_evidence_manifest": "configs/dataset_metadata_evidence.json",
+  "reviews": [],
+  "approved_artifacts": [],
+  "universal_exclusions": [],
+  "not_dataset_gaps": [],
+  "acquisition_plan": {}
+}

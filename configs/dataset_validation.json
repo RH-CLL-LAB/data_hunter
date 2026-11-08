@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-11-08",
+  "purpose": "Workflow optimization means local prompt/routing/parser development, not model training. Independent benchmark readiness requires a frozen source-only/withheld-reference contract and independent reference review.",
+  "groups": {},
+  "dynamic_groups": {},
+  "input_scopes": [],
+  "families": {},
+  "shared_family_notes": {},
+  "review_notes": {},
+  "source_file_selectors": {
+    "CDEMAPPER_ADRD": [],
+    "CDEMAPPER_EYE": [],
+    "CDEMAPPER_STROKE": [],
+    "CDEMAPPER_COVID_19": [],
+    "UKB_EFO": [],
+    "BIOMAPPINGS_EFO": [],
+    "OLS_EFO": [],
+    "EFO_TARGET": []
+  },
+  "independent_benchmark_requirements": [],
+  "limits": {
+    "max_decompressed_bytes_per_file": 536870912,
+    "max_archive_members": 100000,
+    "max_member_bytes_to_parse": 16777216
+  }
+}

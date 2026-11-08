@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-11-08",
+  "scope": "Dataset selection judgments for clinical schema mapping and source-faithful extraction. Relevance, acquisition priority, file completeness, rights and benchmark readiness are independent.",
+  "default": {
+    "workflow_relevance": "unassessed",
+    "reason": "No source-specific evidence yet establishes a new capability beyond held sources. Inspect exact dictionaries before selection.",
+    "action_priority": "P3 / hold",
+    "action": "Keep metadata only; promote only for a defined validation gap and a reviewed minimal package."
+  },
+  "category_relevance": {
+    "mapping_references": {
+      "workflow_relevance": "high",
+      "reason": "Clinical schema/term/reference material directly tests semantic mapping; reference quality and source-only isolation still require review."
+    },
+    "clinical_sources": {
+      "workflow_relevance": "moderate",
+      "reason": "Clinical tables can test native schema, keys, values and time; independent mapping/extraction gold is not established for the whole source."
+    },
+    "synthetic_controls": {
+      "workflow_relevance": "moderate",
+      "reason": "Useful format/ETL software controls; generated/Pilot-related data do not establish independent real-world clinical validity."
+    },
+    "tabular_controls": {
+      "workflow_relevance": "low",
+      "reason": "Clinical prediction/ARFF table provides schema stress only; lacks a paired harmonization or patient-event extraction oracle."
+    },
+    "standards_and_methods": {
+      "workflow_relevance": "moderate",
+      "reason": "Standards, conversion code, conformance or methods material supports components but is not itself a complete patient extraction benchmark."
+    },
+    "metadata_only": {
+      "workflow_relevance": "moderate",
+      "reason": "Documentation is useful for deciding which trial package to request; participant and paired output files remain absent."
+    },
+    "excluded": {
+      "workflow_relevance": "low",
+      "reason": "Redundant mirror or aggregate/nonclinical use case does not meet the current dataset-selection objective."
+    }
+  },
+  "priority_groups": [],
+  "relevance_overrides": {},
+  "cll_direct": [],
+  "cll_indirect_laboratory": [],
+  "prepared_resource_groups": {
+    "D04": [],
+    "D01": [],
+    "CDISC_PILOT": [],
+    "D03": [],
+    "D05": [],
+    "D06": [],
+    "D07": [],
+    "D39": [],
+    "D11": [],
+    "D10": [],
+    "ACRIN_6698": []
+  },
+  "proposed_minimum_for_requests": "Nonpatient dictionary/term list, context and keys/time definitions, adjudicated reference/derivation rules, exact candidate/source releases, split/exclusion/adjudication ledger and applicable use terms. Participant records only when the chosen event-level validation actually requires them.",
+  "full_size_policy": "Full provider corpus size unknown unless exact release/member evidence establishes it. Local associated downloads are not the complete corpus, participant count or incremental storage requirement.",
+  "person_key_checks": {
+    "D04": {
+      "path": "data/raw/public_reference_collection/prepared/inputs/mimic_iv_2_2/hosp/patients.csv",
+      "keys": {
+        "subject_id": "native person ID"
+      }
+    },
+    "D39": {
+      "path": "data/raw/public_reference_collection/prepared/inputs/eicu_2_0_1/patient.csv",
+      "keys": {
+        "uniquepid": "native person key",
+        "patientunitstayid": "ICU stay key"
+      }
+    },
+    "D11": {
+      "path": "data/raw/public_reference_collection/prepared/inputs/ctn0094/everybody.csv",
+      "keys": {
+        "who": "native participant key"
+      }
+    },
+    "D07": {
+      "path": "data/raw/public_reference_collection/prepared/inputs/synthea/patients.csv",
+      "keys": {
+        "Id": "synthetic person ID"
+      }
+    },
+    "ACRIN_6698": {
+      "path": "data/raw/public_reference_collection/prepared/inputs/acrin_6698/clinical.csv",
+      "keys": {
+        "TCIA PATIENT ID": "native workbook participant label"
+      }
+    }
+  },
+  "reference_contracts": {
+    "D04": "Native clinical CSV inputs; OMOP demo CSVs are a separate representation, not a verified release-matched event oracle. Existing 24-case developer references are not independent held-out clinical gold.",
+    "D05": "Source schema CSV, separate target schema CSV and withheld source-field→target-field correspondences. Schema mapping only, not patient-event gold.",
+    "D06": "Three prepared OMAP source CSVs; separately held correspondence/target workbooks. Published/local pair count and source rights remain unresolved.",
+    "FCN_MAPPING": "First DOCX table: variable description, concept name/description, concept group and source study. Isolate source descriptions from hidden concept labels; other two tables are model results, not new cases.",
+    "ADHTEB_CDM": "CSV combines target definitions and source-cohort/OMOP/CURIE mapping answers. Source dictionaries are separate public CSV subsets. Blind answer-bearing fields before discovery.",
+    "CDM_FHIR_EVAL": "ZIP: four set-assignment inputs named CSV, prompt, and 12 XLSX workbooks containing gold and prior model-result sheets. Source/gold/results require separate reviewed adapters.",
+    "SCOTTISH_LAB_REF": "Sectioned CSV source profiles, unit-transformation rules and Read→SNOMED crosswalk. No patient-level expected output; retain identifiers lexically and ambiguous rules unscored.",
+    "AIREADI_PUBLIC": "Public CSV mixes question/answer/unit source metadata, target concepts and exact/close/broad relations. Separate target labels, relation classes and source context; incomplete/custom targets require explicit scoring.",
+    "UCUM_TESTS": "XML unit definitions and XML expected-outcome functional cases. Unit conformance only; section-scoped case identifiers, not clinical event mappings.",
+    "CDE_HF": "Requested source CDE dictionary + separately withheld component mappings, vocabulary release and splits. Exact package not obtained.",
+    "SONAR_REFERENCE": "DOCX method/concept/performance tables held. Complete source-variable labels/distribution vectors and splits are absent.",
+    "GDC_SM": "Author TAR contains ten source/target/groundtruth CSV sets; Zenodo ZIP contains a different annotation version and GDC target. Do not merge incompatible labels or treat prepared CSVs as verified original workbook reconstructions.",
+    "D01": "31 native SDTM-domain CSVs and 31 supplied OMOP CSVs. DM has 400 input rows versus 306 OMOP persons; measurement/drug_exposure outputs are empty. Resolve filters and versions before paired scoring; inherited Pilot rights remain unresolved.",
+    "CDISC_PILOT": "22 native SDTM XPT tables; cdisc_sdtm_ready has 21 untouched XPTs plus one explicit Windows-1252→UTF-8 TS CSV projection. Ten supplied ADaM XPTs are analysis derivations, not OMOP gold. Broad XPT conversion was abandoned after a numeric reader disagreement; originals and masks are retained.",
+    "D03": "R object packages and CSV projections contain raw-like, SDTM and ADaM examples with mixed lineage. Five raw-like inputs are not fully paired to the 64 supplied SDTM outputs. Only the three separately cleared generated response CSVs are source inputs; they cannot also be their own gold. Pilot-derived and CoEQ components retain separate restrictions.",
+    "D07": "Native synthetic relational CSV source tables plus a supplied OMOP tutorial representation. Useful for exact software joins and event-format controls; the supplied target/vocabularies have separate rights and are not independent real-clinical truth.",
+    "D11": "25 harmonized CTN-0094 R objects projected to CSV; native who person keys, project and relative-day when values. R types/attributes and NA masks stay in sidecars. The three original trials are not acquired or proven release/row-matched; no independent OMOP/event gold.",
+    "D47": "Original gzip NDJSON FHIR resources and separately recorded scalar-path projections. FHIR links, specimen scope and absent/null distinctions matter. Not release-matched to native MIMIC demos; prior nonblood candidates remain unapproved.",
+    "RICU_DEMOS": "Native mimic.demo/eicu.demo R packages contain FST tables and concept definitions. Later versioned CSV views are separate derived inputs, not a binary/type/floating-point equivalence guarantee. Published concept rules do not supply independent patient-event gold.",
+    "ACRIN_6698": "Native XLSX clinical worksheet and one prepared clinical CSV, with legend kept outside source inputs. A response/QC/outcome table, not images or a paired standardized output. Missing event dates and conflicting timepoint legends remain unresolved.",
+    "FLUPRINT": "Raw and normalized immunology/laboratory tables with sample/participant metadata. Same underlying cohort; native-to-normalized row/unit/field correspondence has not been independently established as an evaluation oracle."
+  },
+  "known_pending_artifact_bytes": {
+    "MPRINT_MAPPING": {
+      "bytes": 53330834,
+      "kind": "advertised ZIP file, not full participant corpus",
+      "evidence": "data/raw/public_reference_collection/acquisitions/harmonization_review_2026-11-04/ontology_llm_zenodo.json"
+    },
+    "AIREADI_PUBLIC": {
+      "bytes": 61171603,
+      "kind": "complete repository release v1.8.8 (258 files; GitHub tree sizes), rights unresolved",
+      "evidence": "data/raw/public_reference_collection/acquisitions/full_release_aireadi_2026-11-06/notices/tree_v1.8.8.json"
+    }
+  },
+  "structure_diagrams": {},
+  "curation_notes": {},
+  "benchmark_tool_studies": [],
+  "tool_roles": [],
+  "preaccess_license_policy": {
+    "reviewed_on": "2026-11-08",
+    "purpose": "Pre-registration feasibility and terms screen, not an executed DUA, download approval or workflow AI authorization.",
+    "order": [],
+    "default_status": "not_reviewed_before_new_access",
+    "default_action": "Review the exact public terms or request a sample agreement/metadata-use grant first; do not infer rights from registration, download availability or a software license.",
+    "lenient_rule": "No explicit applicable AI prohibition passes the AI criterion only; underlying rights, platform/export, research scope, privacy and other conditions still apply. Explicit AI-specific approval is not newly required in lenient mode.",
+    "questions": [],
+    "reviews": [],
+    "coverage": {
+      "scope": "Current P1/P2 entries requiring registration/access approval; families/trials can be alternatives, not independent applications. P2 remains conditional, not a decision to acquire every entry.",
+      "required_registration_ids": [],
+      "deferred_registration_ids": [],
+      "deferred_reason": "P3 / hold; no acquisition planned for the current benchmark. Public terms not comprehensively reviewed; re-screen before any promotion or new access.",
+      "scope_note": "Owner-only metadata requests have separate recorded terms needs; public_no_registration entries are not counted as registration candidates."
+    }
+  }
+}

@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: >-
+  If you use Data Hunter or results produced with it, please cite it using the
+  metadata below. Third-party datasets catalogued by the tool keep their own
+  licences and citation requirements.
+type: software
+title: "Data Hunter: licence-first exploration, validation, selection and download of research datasets"
+authors:
+  - family-names: Tom
+    given-names: Nikola
+  - family-names: Niemann
+    given-names: Carsten Utoft
+repository-code: "https://github.com/RH-CLL-LAB/data_hunter"
+license: Apache-2.0
+date-released: "2026-11-08"
+keywords:
+  - dataset discovery
+  - dataset selection
+  - data licensing
+  - research data management
+  - clinical data harmonization
+  - large language models
