@@ -121,6 +121,9 @@ def register(path, apply=False, root=None):
         events += [{'at': datetime.now(timezone.utc).isoformat(), 'action': 'report_added', 'detail': p, 'source': 'register_research_study.py'} for p in added]
         result['log_events_added'] = len(append_log(root, profile['id'], events))
         if workspace_study_id(root) == profile['id']:
+            marker_path = root / 'study.json'; marker = json.loads(marker_path.read_text())
+            if marker.pop('retired_at', None):  # registering again brings a retired study back
+                marker_path.write_text(json.dumps(marker, indent=2) + '\n'); result['reactivated'] = True
             set_active(profile['id'])
             result['active_study'] = profile['id']
     (run / 'report.json').write_text(json.dumps(result, indent=2) + '\n')

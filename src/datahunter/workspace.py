@@ -96,9 +96,13 @@ def workspace_root(default=None, bootstrap=False):
     study = active_study_id()
     if study:
         folder = study_path(study)
-        if not is_study_workspace(folder):
+        if is_study_workspace(folder):
+            return folder
+        if os.environ.get('DATA_HUNTER_STUDY'):
             raise SystemExit('active_study_workspace_missing: ' + str(folder))
-        return folder
+        # The pointer names a folder that was deleted by hand: drop it and carry on as if no study were active.
+        print('warning: active study folder missing, pointer cleared: ' + str(folder), file=sys.stderr)
+        clear_active(study)
     if (CODE_ROOT / 'configs/research_studies.json').is_file():
         return CODE_ROOT
     if bootstrap:
