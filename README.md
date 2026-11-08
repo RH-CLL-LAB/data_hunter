@@ -113,6 +113,9 @@ navigation. With no study yet, the build uses a bootstrap workspace
 The server shows the **active study**. Registering a study makes it active;
 switch with `Scripts/study.py use <id>` and list studies with
 `Scripts/study.py list`. The server follows the switch without a restart.
+The **Study** picker in the site header also lists the other registered studies
+whose sites have been built and opens the chosen study's site; rebuild a study's
+site after registering a new study so its picker knows about it.
 
 Rebuild the site after the active study's registries change:
 

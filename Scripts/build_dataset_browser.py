@@ -22,7 +22,7 @@ from audit_dataset_downloads import LOCKS
 
 CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(CODE_ROOT/'src'))
-from datahunter.workspace import workspace_root,ensure_bootstrap,resolve_snapshot,snapshot_path
+from datahunter.workspace import workspace_root,ensure_bootstrap,resolve_snapshot,snapshot_path,list_studies,study_path,site_dir,workspace_study_id
 ROOT = workspace_root(default=CODE_ROOT)
 from datahunter.research_studies import read_log as read_study_log, default_study
 DEFAULT_STUDY=None
@@ -503,8 +503,34 @@ def markdown(source,page):
     return '<div class="prose">'+''.join(out)+'</div>'
 
 
+def registered_workspaces(page):
+    """Every registered study workspace with a built site, linked from this page.
+
+    The site is static and holds one study's registries, so switching to another registered
+    study is a navigation to that study's own generated site (the local server exposes them all).
+    """
+    current=workspace_study_id(ROOT)
+    if not current:return []
+    try:ids=list_studies()
+    except OSError:return []
+    rows=[]
+    for study_id in ids:
+        folder=study_path(study_id)
+        try:
+            marker=json.loads((folder/'study.json').read_text());registry=json.loads((folder/'configs/research_studies.json').read_text())
+        except (OSError,ValueError):continue
+        if marker.get('retired_at'):continue
+        name=next((s.get('name') for s in registry.get('studies',[]) if s.get('id')==study_id),None)
+        if not name:continue  # workspace created, brief not registered yet
+        index=site_dir(folder)/'index.html'
+        if study_id!=current and not index.is_file():continue  # nothing to open until that site is built
+        rows.append({'id':study_id,'name':name,'current':study_id==current,'href':href(index,page)})
+    return rows
+
+
 def study_shell_data(page):
-    return '<script type="application/json" id="research-study-data" data-base="'+e(href(OUT,page).rstrip('/')+'/')+'">'+json.dumps(RESEARCH_STUDIES,ensure_ascii=False).replace('<','\\u003c')+'</script><p class="study-context small" data-research-study-context></p>'
+    seed={**RESEARCH_STUDIES,'workspaces':registered_workspaces(page)}
+    return '<script type="application/json" id="research-study-data" data-base="'+e(href(OUT,page).rstrip('/')+'/')+'">'+json.dumps(seed,ensure_ascii=False).replace('<','\\u003c')+'</script><p class="study-context small" data-research-study-context></p>'
 
 
 # The tool's own name: it serves any research study; the workspace's default study provides the baseline ratings.

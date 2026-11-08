@@ -6,6 +6,11 @@
  function refresh(){
   switcher.replaceChildren();
   for(const study of api.all()){const o=document.createElement('option');o.value=study.id;o.textContent=study.name;o.selected=study.id===api.current().id;switcher.append(o);}
+  // Other registered studies live in their own generated sites: choosing one opens that site.
+  const others=(seed.workspaces||[]).filter(w=>!w.current);
+  if(others.length){const group=document.createElement('optgroup');group.label='Other registered studies';
+   for(const w of others){const o=document.createElement('option');o.value='workspace:'+w.id;o.textContent=w.name;o.dataset.href=w.href;group.append(o);}
+   switcher.append(group);}
   document.querySelectorAll('[data-active-study-name]').forEach(n=>n.textContent=api.current().name);
  }
  refresh();
@@ -31,6 +36,7 @@
  renderRecords();
  // Switching keeps you on the current page; the catalogue restores that study's saved view.
  switcher.addEventListener('change',()=>{
+  if(switcher.value.startsWith('workspace:')){const target=(seed.workspaces||[]).find(w=>'workspace:'+w.id===switcher.value);if(target){location.href=target.href;return;}}
   api.activate(switcher.value);
   if(document.querySelector('[data-catalogue]')){location.href=base+'catalogue.html?'+api.query(switcher.value);return;}
   const url=new URL(location.href);url.searchParams.set('study',switcher.value);url.searchParams.delete('selection');location.href=url.href;
