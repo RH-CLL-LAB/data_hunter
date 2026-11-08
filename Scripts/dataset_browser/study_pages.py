@@ -21,7 +21,7 @@ def projects():
         result += '<label>'+label+('<input' if name in {'id', 'name'} else '<textarea')+' name="'+name+'" maxlength="'+('80' if name=='id' else '160' if name=='name' else '4000')+'" placeholder="'+placeholder+'"'+(' required' if name in {'id', 'name', 'question', 'intended_use'} else '')+('>' if name in {'id', 'name'} else '></textarea>')+'</label>'
     result += '<button class="agent-save" type="submit">Create study and start dataset search</button><p role="status" data-new-study-status></p></form></section>'
     records = ('<section class="panel" style="margin:24px 0" data-study-records><h2>Reports &amp; action log</h2>'
-               '<p class="small">Reports and registered actions come from the project registry (<code>docs/research-studies/&lt;study&gt;/</code>). '
+               '<p class="small">Reports and registered actions come from the study folder (<code>studies/&lt;study&gt;/</code>: <code>reports/</code> and <code>actions.jsonl</code>). '
                'Actions taken in this browser are listed separately until you export the study and register it. The log records what happened; it grants no data permission.</p>'
                '<h3>Reports</h3><ul data-study-reports></ul><h3>Action log</h3><ol class="studylog" reversed data-study-log></ol></section>')
     result += records

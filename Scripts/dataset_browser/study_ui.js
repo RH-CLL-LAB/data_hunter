@@ -88,7 +88,7 @@
    const command='.venv/bin/python Scripts/register_research_study.py --remove '+current.id+' --apply';
    let copied=false;try{await navigator.clipboard.writeText(command);copied=true;}catch(_){}
    const dropped=api.remove();
-   message.textContent=(copied?'Removal command copied. ':'Copy this command: '+command+' . ')+'Run it with Claude Code or Codex to remove “'+current.name+'” from the registry; its reports and action log stay in docs/research-studies/'+current.id+'/. '+(dropped.registered?'This browser’s own draft of the study was discarded.':'');
+   message.textContent=(copied?'Removal command copied. ':'Copy this command: '+command+' . ')+'Run it with Claude Code or Codex to remove “'+current.name+'” ; it stops being the active study and its folder studies/'+current.id+'/ with registries, data, reports and log is kept. '+(dropped.registered?'This browser’s own draft of the study was discarded.':'');
   });
  }
  const restore=document.querySelector('[data-restore-archived-study]');if(restore)restore.addEventListener('click',()=>{try{api.restoreArchived();location.href=base+'research-studies.html?study='+encodeURIComponent(api.current().id);}catch(error){document.querySelector('[data-new-study-status]').textContent=error.message;}});
