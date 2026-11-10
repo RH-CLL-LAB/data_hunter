@@ -318,7 +318,7 @@ def write_document(root=ROOT):
     return doc, rows, counts
 
 
-def save_report(root, doc, title='Dataset status and next actions', stem='dataset-status', runs_dir='status_reports'):
+def save_report(root, doc, title='Dataset status and next actions', stem='dataset-status', runs_dir='status_reports', links=None):
     """Save a dated tracked copy under reports/ and register it with the workspace's study. Other generated documents
     (the data-structure report) reuse it with their own title and file stem."""
     root = Path(root).resolve()
@@ -328,7 +328,10 @@ def save_report(root, doc, title='Dataset status and next actions', stem='datase
     today = date.today().isoformat()
     target = root / 'reports' / f'{stem}-{today}.md'
     target.parent.mkdir(exist_ok=True)
-    target.write_text(re.sub(r'\]\(((?:DATASET_[A-Z_]+|DATA_LICENSES_AND_AI_USE)\.md(?:#[^)]*)?)\)', r'](../docs/\1)', doc.read_text()))  # the document is written for docs/; from reports/ its sibling links need the docs/ prefix
+    text = re.sub(r'\]\(((?:DATASET_[A-Z_]+|DATA_LICENSES_AND_AI_USE)\.md(?:#[^)]*)?)\)', r'](../docs/\1)', doc.read_text())
+    for name, replacement in (links or {}).items():  # files saved next to the dated copy (the structure report's variable dictionary)
+        text = text.replace(f']({name})', f']({replacement})')
+    target.write_text(text)  # the document is written for docs/; from reports/ its sibling links need the docs/ prefix
     registry = read(root / 'configs/research_studies.json')
     study = next(s for s in registry['studies'] if s['id'] == study_id)
     request = {'schema_version': 1, 'kind': 'datahunter_research_study', 'study': {k: study[k] for k in ['id', 'name', 'question', 'intended_use', 'population', 'targets', 'inclusion', 'exclusion']},

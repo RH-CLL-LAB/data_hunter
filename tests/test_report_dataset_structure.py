@@ -1,11 +1,14 @@
 """The data-structure report profiles the held files deterministically and tells what is known before access; offline fixtures."""
-from datetime import date
+from datetime import date, datetime
+import csv
 import gzip
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import sqlite3
+import struct
 import sys
 import tempfile
 import unittest
@@ -16,6 +19,7 @@ CODE_ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('report_dataset_structure', CODE_ROOT / 'Scripts/report_dataset_structure.py')
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+table_name = module.table_name
 
 
 def write(path, value):
@@ -98,7 +102,7 @@ class StructureReportTests(unittest.TestCase):
         self.assertEqual(held['tables'], 8)
         self.assertEqual([c['name'] for c in tables[('wide.csv', None)]['columns']], ['id', 'label'], 'a UTF-16 table is decoded by its byte-order mark')
         self.assertEqual(held['others'], {'.md': 1, '.py': 1, '.txt': 1})
-        self.assertEqual([(s['path'].split('/')[-1], s['reason']) for s in held['skipped']], [('blob.csv', 'binary_content_not_a_text_table'), ('results.parquet', 'format_adapter_missing')])
+        self.assertEqual([(s['path'].split('/')[-1], s['reason']) for s in held['skipped']], [('blob.csv', 'binary_content_not_a_text_table'), ('results.parquet', 'not_a_parquet_file')], 'a file named .parquet is opened by the Parquet reader')
         self.assertEqual(data['datasets'][0]['family_held'], [])
         gated = next(d for d in data['datasets'] if d['id'] == 'GATED')
         self.assertEqual(gated['family_held'], ['HELD_DEMO'])
@@ -144,7 +148,10 @@ class StructureReportTests(unittest.TestCase):
         self.assertIn('### HELD_DEMO — Held demo release', text)
         self.assertIn('| `hadm_id` | integer | 4 | 0.0% | 4 (unique) |', text)
         self.assertIn('labels: URGENT (2), ELECTIVE (1), EW EMER. (1)', text)
-        self.assertIn('Not profiled: 1 file(s): binary content not a text table; 1 file(s): format adapter missing.', text)
+        self.assertIn('Not profiled: 1 file(s): binary content, not a text table (`blob.csv`); 1 file(s): not a Parquet file (`results.parquet`).', text)
+        self.assertIn('| `hosp/` | 1 | 177 B | 1 | 1 .csv.gz |', text, 'the composition lists the folders of the release')
+        self.assertIn('[DATASET_VARIABLES.csv](DATASET_VARIABLES.csv)', text)
+        self.assertTrue((self.root / 'docs/DATASET_VARIABLES.csv').is_file())
         headings = [l for l in text.splitlines() if l.startswith('#### ')]
         self.assertEqual(len(headings), len(set(headings)), 'every table heading is unique on the page')
         self.assertTrue(headings[0].startswith('#### HELD_DEMO · table 1 · `'), headings[0])
@@ -243,6 +250,257 @@ class StructureReportTests(unittest.TestCase):
         self.assertTrue(list((self.root / 'runs/structure_reports').glob('*/study_update.json')))
         log = [json.loads(l)['action'] for l in (self.root / 'actions.jsonl').read_text().splitlines()]
         self.assertIn('report_added', log)
+
+
+
+# ------------------------------------------------------------------ fixtures for the readers: files built byte by byte, no third-party writer
+def thrift_varint(n):
+    out = bytearray()
+    while True:
+        byte, n = n & 0x7f, n >> 7
+        out.append(byte | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def thrift_zigzag(n):
+    return thrift_varint((n << 1) ^ (n >> 63))
+
+
+def thrift_value(kind, value):
+    if kind in (5, 6):
+        return thrift_zigzag(value)
+    if kind == 8:
+        return thrift_varint(len(value)) + value
+    if kind == 12:
+        return thrift_struct(value)
+    if kind == 9:
+        element, items = value
+        return bytes([(len(items) << 4) | element]) + b''.join(thrift_value(element, i) for i in items)
+    raise ValueError(kind)
+
+
+def thrift_struct(fields):
+    """fields: [(id, kind, value)] in id order; kind 1 is a boolean field."""
+    out, last = bytearray(), 0
+    for field, kind, value in fields:
+        code = (1 if value else 2) if kind == 1 else kind
+        out.append(((field - last) << 4) | code)
+        if kind != 1:
+            out += thrift_value(kind, value)
+        last = field
+    return bytes(out) + b'\x00'
+
+
+def parquet_file(rows=5):
+    """A Parquet file with a valid footer: subject_id INT64 (2 nulls, 10..90), code STRING, time TIMESTAMP(us)."""
+    leaf = lambda name, physical, extra=(): thrift_struct([(1, 5, physical), (3, 5, 1), (4, 8, name)] + list(extra))  # noqa: E731
+    schema = [thrift_struct([(4, 8, b'schema'), (5, 5, 3)]), leaf(b'subject_id', 2), leaf(b'code', 6, [(6, 5, 0), (10, 12, [(1, 12, [])])]),
+              leaf(b'time', 2, [(10, 12, [(8, 12, [(1, 1, True), (2, 12, [(2, 12, [])])])])])]
+    def chunk(path, physical, stats):
+        meta = [(1, 5, physical), (2, 9, (5, [0])), (3, 9, (8, [path])), (4, 5, 0), (5, 6, rows), (6, 6, 10), (7, 6, 10), (9, 6, 4)] + ([(12, 12, stats)] if stats else [])
+        return [(2, 6, 4), (3, 12, meta)]
+    micro = lambda iso: int((datetime.fromisoformat(iso) - datetime(1970, 1, 1)).total_seconds() * 1_000_000)  # noqa: E731
+    group = [(1, 9, (12, [chunk(b'subject_id', 2, [(3, 6, 2), (5, 8, struct.pack('<q', 90)), (6, 8, struct.pack('<q', 10))]),
+                          chunk(b'code', 6, [(3, 6, 0), (5, 8, b'zzz'), (6, 8, b'aaa')]),
+                          chunk(b'time', 2, [(3, 6, 1), (5, 8, struct.pack('<q', micro('2150-02-01 08:30:00'))), (6, 8, struct.pack('<q', micro('2150-01-01 00:00:00')))])])),
+             (2, 6, 30), (3, 6, rows)]
+    footer = thrift_struct([(1, 5, 1), (2, 9, (12, [None] * 0)), (3, 6, rows), (4, 9, (12, []))])  # placeholder, replaced below
+    body = bytearray()
+    body.append((1 << 4) | 5); body += thrift_zigzag(1)
+    body.append((1 << 4) | 9); body.append((len(schema) << 4) | 12); body += b''.join(schema)
+    body.append((1 << 4) | 6); body += thrift_zigzag(rows)
+    body.append((1 << 4) | 9); body.append((1 << 4) | 12); body += thrift_struct(group)
+    footer = bytes(body) + b'\x00'
+    return b'PAR1' + b'\x00' * 16 + footer + struct.pack('<I', len(footer)) + b'PAR1'
+
+
+def ibm(value):
+    if value == 0:
+        return b'\x00' * 8
+    sign, value, exponent = (0x80 if value < 0 else 0), abs(value), 0
+    while value >= 1:
+        value, exponent = value / 16, exponent + 1
+    while value < 1 / 16:
+        value, exponent = value * 16, exponent - 1
+    return bytes([sign | (exponent + 64)]) + int(round(value * (1 << 56))).to_bytes(7, 'big')
+
+
+def xpt_file():
+    """SAS transport v5 with one dataset DM: USUBJID char(8), BRTHDT num DATE9., AGE num; the second subject's birth date is missing."""
+    record = lambda text: (text.encode('latin-1') if isinstance(text, str) else text).ljust(80, b' ')  # noqa: E731
+    out = record('HEADER RECORD*******LIBRARY HEADER RECORD!!!!!!!000000000000000000000000000000')
+    out += record('SAS     SAS     SASLIB  9.4     X64_10PR' + ' ' * 24 + '01JAN20:00:00:00') + record('01JAN20:00:00:00')
+    out += record('HEADER RECORD*******MEMBER  HEADER RECORD!!!!!!!000000000000000001600000000140')
+    out += record('HEADER RECORD*******DSCRPTR HEADER RECORD!!!!!!!000000000000000000000000000000')
+    out += record('SAS     DM      SASDATA 9.4     X64_10PR' + ' ' * 24 + '01JAN20:00:00:00')
+    out += record('01JAN20:00:00:00' + ' ' * 16 + 'Demographics'.ljust(40) + 'DATA    ')
+    out += record('HEADER RECORD*******NAMESTR HEADER RECORD!!!!!!!0000000003' + '0' * 20)
+    variables = [(2, 8, 1, 'USUBJID', 'Unique Subject Identifier', '', 0), (1, 8, 2, 'BRTHDT', 'Date of Birth', 'DATE', 8), (1, 8, 3, 'AGE', 'Age', '', 16)]
+    names = b''.join(struct.pack('>hhhh8s40s8shhh2s8shhl52s', t, 0, n, v, name.encode().ljust(8), label.encode().ljust(40), fmt.encode().ljust(8), 9 if fmt else 0, 0, 0, b'\x00\x00', b' ' * 8, 0, 0, pos, b'\x00' * 52)
+                     for t, n, v, name, label, fmt, pos in variables)
+    out += names.ljust(-(-len(names) // 80) * 80, b'\x00')
+    out += record('HEADER RECORD*******OBS     HEADER RECORD!!!!!!!000000000000000000000000000000')
+    born = (datetime(1950, 3, 15) - datetime(1960, 1, 1)).days
+    data = b'01-001  ' + ibm(born) + ibm(76) + b'01-002  ' + b'.' + b'\x00' * 7 + ibm(70.5)
+    return out + data.ljust(-(-len(data) // 80) * 80, b' ')
+
+
+MAIN = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+
+
+def xlsx_file(path):
+    with zipfile.ZipFile(path, 'w') as book:
+        book.writestr('[Content_Types].xml', '<Types/>')
+        book.writestr('xl/workbook.xml', f'<workbook {MAIN} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'
+                                         '<sheet name="Labs" sheetId="1" r:id="rId1"/><sheet name="Empty" sheetId="2" r:id="rId2"/></sheets></workbook>')
+        book.writestr('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                                                     '<Relationship Id="rId1" Type="w" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="w" Target="/xl/worksheets/sheet2.xml"/></Relationships>')
+        book.writestr('xl/sharedStrings.xml', f'<sst {MAIN}><si><t>patient</t></si><si><t>test</t></si><si><r><t>res</t></r><r><t>ult</t></r></si><si><t>taken</t></si>'
+                                              '<si><t>HGB</t></si><si><t>WBC</t></si><si><t>Lab results 2023</t></si></sst>')
+        book.writestr('xl/styles.xml', f'<styleSheet {MAIN}><numFmts count="1"><numFmt numFmtId="164" formatCode="dd/mm/yyyy"/></numFmts>'
+                                       '<cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="164"/></cellXfs></styleSheet>')
+        cells = lambda r, *cs: f'<row r="{r}">' + ''.join(cs) + '</row>'  # noqa: E731
+        book.writestr('xl/worksheets/sheet1.xml', f'<worksheet {MAIN}><sheetData>'
+                      + cells(2, '<c r="A2" t="s"><v>0</v></c>', '<c r="B2" t="s"><v>1</v></c>', '<c r="C2" t="s"><v>2</v></c>', '<c r="D2" t="s"><v>3</v></c>')
+                      + cells(3, '<c r="A3"><v>1</v></c>', '<c r="B3" t="s"><v>4</v></c>', '<c r="C3"><v>13.5</v></c>', '<c r="D3" s="1"><v>45000</v></c>')
+                      + cells(4, '<c r="A4"><v>2</v></c>', '<c r="B4" t="s"><v>5</v></c>', '<c r="D4" s="1"><v>45001.5</v></c>')
+                      + cells(5, '<c r="A5" t="inlineStr"><is><t>3</t></is></c>', '<c r="B5" t="s"><v>4</v></c>', '<c r="C5" t="e"><v>#N/A</v></c>')
+                      + '</sheetData></worksheet>')
+        book.writestr('xl/worksheets/sheet2.xml', f'<worksheet {MAIN}><sheetData/></worksheet>')
+
+
+def workspace_with(root, files):
+    """A study workspace whose one held dataset HELD consists of exactly these files (relative path -> bytes)."""
+    write(root / 'study.json', {'schema_version': 1, 'id': 'demo-study'})
+    write(root / 'configs/research_studies.json', {'schema_version': 1, 'default_study': 'demo-study', 'studies': [
+        {'id': 'demo-study', 'name': 'Demo study', 'question': 'q', 'intended_use': 'u', 'population': '', 'targets': '', 'inclusion': '', 'exclusion': '',
+         'dataset_ids': [], 'dataset_annotations': {}, 'study_annotations': {}}]})
+    artifacts = []
+    for rel, content in files.items():
+        path = root / 'data/acquisitions/datasets/held' / rel
+        write(path, content)
+        artifacts.append({'path': str(path.relative_to(root)), 'bytes': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+    selection = root / 'data/interim/dataset_selection/20260101T000000000000Z/selection.json'
+    write(selection, {'datasets': [{'id': 'HELD', 'name': 'Held release', 'category': 'clinical_sources', 'access_route': 'public_no_registration', 'registration_url': None, 'scope': '',
+                                    'source_urls': [], 'completeness': 'complete_public_release', 'obtained_artifacts': artifacts, 'source_locators': ['data/acquisitions/datasets/held/']}]})
+    write(root / 'data/interim/dataset_selection/latest.json', {'selection': str(selection.relative_to(root)), 'selection_sha256': hashlib.sha256(selection.read_bytes()).hexdigest(),
+                                                               'summary': {'rechecked_unique_artifacts': len(artifacts)}})
+    write(root / 'configs/research_resources.lock.json', {'schema_version': 1, 'files': [{'id': f'f{i}', **a} for i, a in enumerate(artifacts)]})
+    return artifacts
+
+
+class ReaderTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+
+    def held(self, files, **options):
+        workspace_with(self.root, files)
+        return next(d for d in module.collect(self.root, options or None)['datasets'] if d['id'] == 'HELD')
+
+    def tables(self, held):
+        return {table_name(a['path'], t): t for a in held['artifacts'] for t in a['tables']}
+
+    def test_excel_sheets_are_profiled_with_their_header_row_and_dates(self):
+        buffer = self.root.parent / (self.root.name + '-book.xlsx')
+        self.addCleanup(buffer.unlink, True)
+        xlsx_file(buffer)
+        held = self.held({'labs.xlsx': buffer.read_bytes()})
+        [(name, sheet)] = self.tables(held).items()
+        self.assertTrue(name.endswith('labs.xlsx → Labs'), 'one table per sheet with data; the empty sheet is not a table')
+        self.assertEqual((sheet['format'], sheet['rows']), ('Excel sheet', 3))
+        columns = {c['name']: c for c in sheet['columns']}
+        self.assertEqual(list(columns), ['patient', 'test', 'result', 'taken'], 'the first non-empty row is the header; rich text and shared strings are joined')
+        self.assertEqual((columns['patient']['type'], columns['result']['type'], columns['result']['missing']), ('integer', 'number', 2), 'error and absent cells are missing')
+        self.assertEqual(columns['test']['labels'], [{'value': 'HGB', 'count': 2}, {'value': 'WBC', 'count': 1}])
+        self.assertEqual((columns['taken']['type'], columns['taken']['time_range']), ('datetime', ['2023-03-15', '2023-03-16 12:00:00']), 'date-formatted serials become dates')
+
+    def test_parquet_is_described_from_its_footer(self):
+        held = self.held({'data/part-0.parquet': parquet_file()})
+        [table] = self.tables(held).values()
+        self.assertEqual((table['format'], table['rows'], table['statistics'], table['row_groups']), ('Parquet', 5, 'footer', 1))
+        columns = {c['name']: c for c in table['columns']}
+        self.assertEqual((columns['subject_id']['declared_type'], columns['subject_id']['type'], columns['subject_id']['values'], columns['subject_id']['missing']), ('INT64', 'integer', 3, 2))
+        self.assertEqual((columns['subject_id']['numeric']['min'], columns['subject_id']['numeric']['max']), (10, 90))
+        self.assertEqual((columns['code']['declared_type'], columns['code']['type']), ('BYTE_ARRAY/STRING', 'text'))
+        self.assertEqual(module.parquet_leaves([{5: 1}, {3: 1, 4: b'codes', 5: 1}, {3: 2, 4: b'list', 5: 1}, {1: 6, 3: 1, 4: b'element'}]), [('codes.list.element', {1: 6, 3: 1, 4: b'element'}, True)],
+                         'a leaf under a repeated group counts list elements, not rows')
+        self.assertNotIn('numeric', columns['code'], 'text minimum and maximum are cell values and are not copied')
+        self.assertEqual((columns['time']['declared_type'], columns['time']['type'], columns['time']['time_range']),
+                         ('INT64/TIMESTAMP(us)', 'datetime', ['2150-01-01 00:00:00', '2150-02-01 08:30:00']))
+        doc, _ = module.write_document(self.root)
+        self.assertIn("schema and the writer's footer statistics, values not read", doc.read_text())
+
+    def test_sas_transport_datasets_keep_their_labels_and_dates_and_an_html_page_is_reported(self):
+        held = self.held({'sdtm/dm.xpt': xpt_file(), 'refs/ranges.xpt': b'<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD></HTML>'})
+        [(name, table)] = self.tables(held).items()
+        self.assertTrue(name.endswith('dm.xpt → DM'))
+        self.assertEqual((table['format'], table['rows'], table['dataset_label']), ('SAS transport (XPORT v5)', 2, 'Demographics'))
+        columns = {c['name']: c for c in table['columns']}
+        self.assertEqual({n: (c['label'], c['declared_type'], c['type']) for n, c in columns.items()},
+                         {'USUBJID': ('Unique Subject Identifier', 'char(8)', 'text'), 'BRTHDT': ('Date of Birth', 'num(8) DATE', 'date'), 'AGE': ('Age', 'num(8)', 'number')})
+        self.assertEqual((columns['BRTHDT']['time_range'], columns['BRTHDT']['missing']), (['1950-03-15', '1950-03-15'], 1), 'SAS dates count days from 1960; a SAS missing value is missing')
+        self.assertEqual((columns['AGE']['numeric']['min'], columns['AGE']['numeric']['max']), (70.5, 76.0))
+        self.assertEqual([s['reason'] for s in held['skipped']], ['content_is_an_html_page_not_sas_transport'])
+        text = module.write_document(self.root)[0].read_text()
+        self.assertIn('| `USUBJID` Unique Subject Identifier | char(8) → text |', text)
+        self.assertIn('an HTML page saved under a SAS transport name (upstream content, not data) (`ranges.xpt`)', text)
+
+    def test_delimited_text_tables_are_recognised_and_prose_is_not(self):
+        held = self.held({'set-a/1001.txt': 'Time,Parameter,Value\n00:00,Age,54\n00:07,HR,73\n00:37,HR,77\n', 'set-a/1002.txt': 'Time,Parameter,Value\n00:00,Age,61\n01:00,HR,90\n',
+                          'set-a/1003.txt': 'Time,Parameter,Value\n00:00,Age,48\n00:30,Temp,37.2\n', 'vitals.psv': 'HR|O2Sat|SepsisLabel\n80|97|0\n91|95|1\n',
+                          'README.txt': 'a,b,c\n1,2,3\n4,5,6\n', 'notes.txt': 'This release, prepared by us, contains\nthree folders of records\nand, a table of outcomes.\n'})
+        tables = self.tables(held)
+        self.assertEqual(sorted(n.rsplit('/', 1)[-1] for n in tables), ['1001.txt', '1002.txt', '1003.txt', 'vitals.psv'])
+        self.assertEqual(next(t for n, t in tables.items() if n.endswith('vitals.psv'))['delimiter'], 'pipe')
+        self.assertEqual(held['others'], {'.txt': 2}, 'a README and prose stay text')
+        entries = module.families_of(held, module.DEFAULTS)
+        family = next(e for e in entries if e['family'])
+        self.assertEqual((len(family['names']), family['rows'], dict(family['folders'])), (3, 7, {'data/acquisitions/datasets/held/set-a': 3}))
+        merged = {c['name']: c for c in family['columns']}
+        self.assertEqual((merged['Value']['values'], merged['Value']['numeric']['min'], merged['Value']['numeric']['max']), (7, 37.2, 90.0))
+        self.assertEqual(merged['Parameter']['labels'], [{'value': 'HR', 'count': 3}, {'value': 'Age', 'count': 3}, {'value': 'Temp', 'count': 1}], 'complete label lists merge exactly')
+        text = module.write_document(self.root)[0].read_text()
+        self.assertIn('3 tables with the same 3 columns', text)
+        rows = list(csv.DictReader((self.root / 'docs/DATASET_VARIABLES.csv').open()))
+        self.assertEqual([(r['column'], r['tables_with_these_columns']) for r in rows if r['format'] == 'delimited text' and r['tables_with_these_columns'] == '3'],
+                         [('Time', '3'), ('Parameter', '3'), ('Value', '3')], 'the dictionary lists a family once')
+        self.assertEqual(len(rows), 6)
+
+    def test_archive_metadata_is_ignored_and_large_members_are_streamed(self):
+        archive = io.BytesIO()
+        big = 'id,value\n' + ''.join(f'{i},{i * 2}\n' for i in range(5000))
+        with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as z:
+            z.writestr('release/big.csv', big)
+            z.writestr('__MACOSX/release/._big.csv', b'\x00\x05\x16\x07binary resource fork')
+            z.writestr('release/.DS_Store', b'\x00\x00\x00\x01Bud1')
+            z.writestr('release/meta.json', json.dumps([{'k': i} for i in range(3000)]))
+        workspace_with(self.root, {'release.zip': archive.getvalue()})
+        write(self.root / 'configs/dataset_validation.json', {'limits': {'max_member_bytes_to_parse': 1024}})
+        held = next(d for d in module.collect(self.root)['datasets'] if d['id'] == 'HELD')
+        tables = self.tables(held)
+        self.assertEqual(next(t for n, t in tables.items() if n.endswith('big.csv'))['rows'], 5000, 'a delimited member larger than the member budget is streamed')
+        self.assertEqual([(s['member'], s['reason']) for s in held['skipped']], [('release/meta.json', 'member_over_parse_budget')], 'a JSON document is read whole and keeps the budget')
+        self.assertEqual(held['others'], {'archive metadata': 2})
+        text = module.write_document(self.root)[0].read_text()
+        self.assertIn('2 archive metadata entries (macOS `__MACOSX/` resource forks, `.DS_Store`) are not data and were ignored.', text)
+        self.assertIn('| [HELD](#held) | 1 (', text)
+        self.assertTrue(text.split('| [HELD](#held) | 1 (')[1].split('\n')[0].endswith('| 1 | 5,000 | 2 | 0 | 1 |'), 'metadata entries are not counted as other files')
+
+    def test_a_profile_cut_by_the_table_budget_is_never_reused(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w') as z:
+            for i in range(3):
+                z.writestr(f't{i}.csv', 'a,b\n1,2\n')
+        workspace_with(self.root, {'tables.zip': archive.getvalue()})
+        _, first = module.write_document(self.root, {'max_tables': 2})
+        self.assertEqual(next(d for d in first['datasets'] if d['id'] == 'HELD')['tables'], 2)
+        _, second = module.write_document(self.root, {'max_tables': 2})
+        self.assertEqual(second['reused_artifacts'], 0, 'the cut profile depends on the budget left, so it is profiled again')
+
+
 
 
 if __name__ == '__main__':

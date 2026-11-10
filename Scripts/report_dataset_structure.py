@@ -6,10 +6,14 @@ Reads the current catalogue receipt (which verified, locked files each dataset h
 size limits) and the licence registers (retained documentation), and writes docs/DATASET_STRUCTURE.md plus a JSON record
 under data/interim/dataset_structure/<run>/:
 
-  1. held datasets, one section each: every tabular file or archive member (CSV/TSV, gzip-compressed tables, ARFF, SQLite,
-     NDJSON, record-list JSON, tables inside ZIP archives) as a table with its columns, declared or inferred types,
-     missingness, distinct counts, numeric and date ranges and the labels of low-cardinality columns; the other files are
-     counted by extension; files no adapter reads are listed with the reason;
+  1. held datasets, one section each: their composition (files, size, tables and formats per folder), then every tabular
+     file or archive member (CSV/TSV, delimited text in .txt/.psv/.dat files, gzip-compressed tables, ARFF, SQLite, NDJSON,
+     record-list JSON, Excel workbooks sheet by sheet, Parquet schemas with their footer statistics, SAS transport (XPORT v5)
+     datasets with variable labels, tables inside ZIP archives) as a table with its columns, declared or inferred types,
+     missingness, distinct counts, numeric and date ranges and the labels of low-cardinality columns; tables with the same
+     columns (per-patient files, yearly extracts) are combined into one entry; the other files are counted by extension,
+     archive metadata (macOS __MACOSX/ resource forks, .DS_Store) is ignored, and files no reader handles are listed with
+     the reason;
   2. datasets that are not held (registration, agreement or licence decision pending, or an open release not yet acquired):
      the access route, the registry's scope statement, the same-family releases that ARE held (a provider's demo release
      shows the table and column layout of the gated release, not its counts), the retained public documentation, and what
@@ -18,7 +22,9 @@ under data/interim/dataset_structure/<run>/:
 Deterministic, offline, no model calls, standard library only. Statistics are aggregates: no cell values are copied except
 the labels of columns with few distinct values. The document grants no data or AI-use permission; as a dictionary-like
 derivative of the sources it is covered by the same source-bound preflight as the files it describes before any model
-reads it. `--report` also saves a dated tracked copy under reports/ and registers it with the study.
+reads it. A variable dictionary, docs/DATASET_VARIABLES.csv, lists every column of every profiled table once (tables with
+the same columns as one entry) for filtering in a spreadsheet. `--report` also saves dated tracked copies of both under
+reports/ and registers the report with the study.
 """
 from __future__ import annotations
 
@@ -26,18 +32,23 @@ import argparse
 from collections import Counter
 from copy import deepcopy
 import csv
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import gzip
 from hashlib import sha256
 import io
+from itertools import chain
 import json
 import math
 from pathlib import Path
+import posixpath
 import random
 import re
+import shutil
 import sqlite3
+import struct
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -54,9 +65,17 @@ FLOAT_RE = re.compile(r'^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$')
 DATETIME_RE = re.compile(r'^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$')
 DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 TABLE_SUFFIXES = ('.csv', '.tsv', '.csv.gz', '.tsv.gz')
-ADAPTER_MISSING = ('.parquet', '.feather', '.xlsx', '.xls', '.sav', '.dta', '.rds', '.rdata', '.h5', '.hdf5', '.mat', '.npy', '.npz', '.pkl', '.pickle', '.pt')
+TEXT_TABLE_SUFFIXES = ('.txt', '.psv', '.dat', '.tab', '.txt.gz', '.psv.gz', '.dat.gz')  # delimited text behind a generic name: read only when every sampled line splits alike
+NOT_TABLE_STEMS = ('readme', 'license', 'licence', 'notice', 'changelog', 'changes', 'copying', 'authors', 'citation', 'requirements', 'news', 'install', 'contributing',
+                   'manifest', 'sha256sums', 'md5sums', 'robots')
+ADAPTER_MISSING = ('.feather', '.xls', '.sav', '.dta', '.rds', '.rdata', '.sas7bdat', '.h5', '.hdf5', '.mat', '.npy', '.npz', '.pkl', '.pickle', '.pt')
+ARCHIVE_METADATA = 'archive metadata'  # macOS resource forks and folder settings that zip tools add: not part of the data
+METADATA_NAMES = {'.ds_store', 'thumbs.db', 'desktop.ini'}
+RANDOM_ACCESS_KINDS = {'json', 'xlsx', 'parquet', 'xpt'}  # read whole or by seeking; the other table kinds are streamed
+TABLE_KINDS = {'table', 'text_table', 'arff', 'ndjson'} | RANDOM_ACCESS_KINDS
+BUDGET_REASONS = {'table_budget_for_dataset', 'archive_member_budget'}  # a profile cut by a budget depends on its context and is never reused
 DEFAULT_LIMITS = {'max_decompressed_bytes_per_file': 512 * 1024 * 1024, 'max_archive_members': 100000, 'max_member_bytes_to_parse': 16 * 1024 * 1024}
-DEFAULTS = {'max_rows': 200000, 'max_count_rows': 5000000, 'max_tables': 400, 'distinct_cap': 50000, 'top_cap': 200, 'reservoir': 2000, 'label_levels': 20, 'rendered_tables': 60, 'rendered_columns': 60}
+DEFAULTS = {'max_rows': 200000, 'max_count_rows': 5000000, 'max_tables': 25000, 'distinct_cap': 50000, 'top_cap': 200, 'reservoir': 2000, 'label_levels': 20, 'rendered_tables': 60, 'rendered_columns': 60}
 csv.field_size_limit(16 * 1024 * 1024)
 
 
@@ -281,6 +300,36 @@ def profile_csv(stream, name, options):
     return {'state': 'profiled', 'format': 'delimited text', 'delimiter': 'tab' if delimiter == '\t' else delimiter, **profile}
 
 
+def sniff_delimiter(lines):
+    """The delimiter that splits every sampled line into the same number (at least two) of fields, or None: prose is not a table."""
+    for delimiter in ('\t', ',', '|', ';'):
+        widths = {len(row) for row in csv.reader(lines, delimiter=delimiter)}
+        if len(widths) == 1 and widths.pop() >= 2:
+            return delimiter
+    return None
+
+
+def profile_text_table(stream, name, options):
+    """A .txt/.psv/.dat file that is a delimited table (a header and at least two rows that split alike); anything else is counted as text."""
+    lines = []
+    for line in stream:
+        if line.strip():
+            lines.append(line)
+            if len(lines) >= 6:
+                break
+    if len(lines) < 3 or '\x00' in lines[0]:
+        return {'state': 'other'}
+    delimiter = sniff_delimiter(lines)
+    if delimiter is None:
+        return {'state': 'other'}
+    header = next(csv.reader([lines[0]], delimiter=delimiter))
+    if any(len(h) > 128 for h in header):
+        return {'state': 'other'}
+    body = csv.reader(chain(lines[1:], stream), delimiter=delimiter)
+    profile = profile_rows(header, (row for row in body if row), options)
+    return {'state': 'profiled', 'format': 'delimited text', 'delimiter': {'\t': 'tab', '|': 'pipe'}.get(delimiter, delimiter), **profile}
+
+
 def parse_arff_attribute(line):
     rest = line[len('@attribute'):].strip()
     if rest.startswith(("'", '"')):
@@ -388,8 +437,400 @@ def profile_records(stream, options, kind):
     return out
 
 
+XLSX_MAIN = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+XLSX_REL = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+XLSX_DATE_FORMATS = set(range(14, 23)) | {45, 46, 47}  # Excel's built-in date and time number formats
+
+
+def column_index(reference):
+    letters = re.match(r'[A-Z]+', reference or '')
+    index = 0
+    for letter in letters.group(0) if letters else '':
+        index = index * 26 + ord(letter) - 64
+    return index - 1
+
+
+def excel_date(serial):
+    """An Excel date serial as ISO text (1900 date system); None outside the representable range."""
+    if not 0 < serial < 2958466:
+        return None
+    moment = datetime(1899, 12, 30) + timedelta(days=serial)
+    return moment.date().isoformat() if serial == int(serial) else moment.strftime('%Y-%m-%d %H:%M:%S')
+
+
+def xlsx_part(book, name, limits):
+    info = book.getinfo(name)
+    if info.file_size > limits['max_decompressed_bytes_per_file']:
+        raise ValueError('workbook_part_over_parse_budget')
+    return book.open(info)
+
+
+def xlsx_date_styles(book, limits):
+    """Indexes of the cell styles whose number format is a date or date-time."""
+    if 'xl/styles.xml' not in book.namelist():
+        return set()
+    root = ET.parse(xlsx_part(book, 'xl/styles.xml', limits)).getroot()
+    custom = {}
+    for fmt in root.iter(XLSX_MAIN + 'numFmt'):
+        code = re.sub(r'"[^"]*"|\[[^\]]*\]|\\.', '', fmt.get('formatCode', '')).lower()
+        custom[int(fmt.get('numFmtId', -1))] = any(ch in code for ch in 'dy')
+    cell_formats = root.find(XLSX_MAIN + 'cellXfs')
+    return {i for i, xf in enumerate(cell_formats if cell_formats is not None else []) if int(xf.get('numFmtId', 0)) in XLSX_DATE_FORMATS or custom.get(int(xf.get('numFmtId', 0)))}
+
+
+def xlsx_rows(stream, shared, dates):
+    """Rows of one worksheet as lists of cell values in column order; empty cells are None, error cells missing."""
+    row = {}
+    for _, element in ET.iterparse(stream, events=('end',)):
+        if element.tag == XLSX_MAIN + 'c':
+            kind, style = element.get('t'), element.get('s')
+            raw = element.find(XLSX_MAIN + 'v')
+            text = raw.text if raw is not None else None
+            if kind == 's' and text is not None:
+                value = shared[int(text)] if int(text) < len(shared) else None
+            elif kind == 'inlineStr':
+                value = ''.join(t.text or '' for t in element.iter(XLSX_MAIN + 't'))
+            elif kind == 'b':
+                value = text == '1'
+            elif kind == 'e':
+                value = None
+            elif kind in ('str', 'd'):
+                value = text
+            elif text is not None and style is not None and int(style) in dates:
+                try:
+                    value = excel_date(float(text)) or text
+                except ValueError:
+                    value = text
+            else:
+                value = text
+            row[column_index(element.get('r')) if element.get('r') else len(row)] = value
+            element.clear()
+        elif element.tag == XLSX_MAIN + 'row':
+            yield [row.get(i) for i in range(max(row) + 1)] if row else []
+            row = {}
+            element.clear()
+
+
+def xlsx_tables(source, options, limits, budget_tables):
+    """Every sheet of a workbook with data as a table: the first non-empty row is the header."""
+    tables = []
+    with zipfile.ZipFile(source) as book:
+        names = set(book.namelist())
+        if 'xl/workbook.xml' not in names:
+            return [], 'not_an_excel_workbook'
+        shared = []
+        if 'xl/sharedStrings.xml' in names:
+            for _, element in ET.iterparse(xlsx_part(book, 'xl/sharedStrings.xml', limits)):
+                if element.tag == XLSX_MAIN + 'si':
+                    shared.append(''.join(t.text or '' for t in element.iter(XLSX_MAIN + 't')))
+                    element.clear()
+        targets = {}
+        if 'xl/_rels/workbook.xml.rels' in names:
+            for relation in ET.parse(xlsx_part(book, 'xl/_rels/workbook.xml.rels', limits)).getroot():
+                targets[relation.get('Id')] = relation.get('Target', '')
+        dates = xlsx_date_styles(book, limits)
+        for sheet in ET.parse(xlsx_part(book, 'xl/workbook.xml', limits)).getroot().iter(XLSX_MAIN + 'sheet'):
+            if len(tables) >= budget_tables:
+                break
+            target = targets.get(sheet.get(XLSX_REL + 'id'), '')
+            part = target.lstrip('/') if target.startswith('/') else posixpath.normpath('xl/' + target)
+            if part not in names:
+                continue
+            rows = xlsx_rows(xlsx_part(book, part, limits), shared, dates)
+            header = next((r for r in rows if any(v not in (None, '') for v in r)), None)
+            if header is None:
+                continue
+            columns = [str(v).strip() if v not in (None, '') else f'column {i + 1}' for i, v in enumerate(header)]
+            body = (r + [None] * (len(columns) - len(r)) for r in rows if any(v not in (None, '') for v in r))
+            tables.append({'state': 'profiled', 'format': 'Excel sheet', 'sheet': sheet.get('name'), **profile_rows(columns, body, options)})
+    return tables, (None if tables else 'no_sheet_with_data')
+
+
+class Compact:
+    """A minimal reader of the Thrift compact protocol: enough for the metadata footer of a Parquet file."""
+
+    def __init__(self, data):
+        self.data, self.position = data, 0
+
+    def byte(self):
+        value = self.data[self.position]
+        self.position += 1
+        return value
+
+    def varint(self):
+        shift = result = 0
+        while True:
+            value = self.byte()
+            result |= (value & 0x7f) << shift
+            if not value & 0x80:
+                return result
+            shift += 7
+
+    def zigzag(self):
+        value = self.varint()
+        return (value >> 1) ^ -(value & 1)
+
+    def value(self, kind):
+        if kind in (1, 2):
+            return kind == 1
+        if kind == 3:
+            value = self.byte()
+            return value - 256 if value > 127 else value
+        if kind in (4, 5, 6):
+            return self.zigzag()
+        if kind == 7:
+            value = struct.unpack('<d', self.data[self.position:self.position + 8])[0]
+            self.position += 8
+            return value
+        if kind == 8:
+            size = self.varint()
+            value = self.data[self.position:self.position + size]
+            self.position += size
+            return value
+        if kind in (9, 10):
+            header = self.byte()
+            size, element = header >> 4, header & 0x0f
+            size = self.varint() if size == 15 else size
+            return [self.byte() == 1 if element in (1, 2) else self.value(element) for _ in range(size)]
+        if kind == 11:
+            size = self.varint()
+            kinds = self.byte() if size else 0
+            return {self.value(kinds >> 4): self.value(kinds & 0x0f) for _ in range(size)}
+        if kind == 12:
+            return self.struct()
+        raise ValueError('unknown_thrift_type')
+
+    def struct(self):
+        fields, last = {}, 0
+        while True:
+            header = self.byte()
+            if header == 0:
+                return fields
+            delta, kind = header >> 4, header & 0x0f
+            last = last + delta if delta else self.zigzag()
+            fields[last] = self.value(kind)
+
+
+PARQUET_PHYSICAL = {0: 'BOOLEAN', 1: 'INT32', 2: 'INT64', 3: 'INT96', 4: 'FLOAT', 5: 'DOUBLE', 6: 'BYTE_ARRAY', 7: 'FIXED_LEN_BYTE_ARRAY'}
+PARQUET_CONVERTED = {0: 'UTF8', 4: 'ENUM', 5: 'DECIMAL', 6: 'DATE', 7: 'TIME_MILLIS', 8: 'TIME_MICROS', 9: 'TIMESTAMP_MILLIS', 10: 'TIMESTAMP_MICROS', 19: 'JSON'}
+PARQUET_LOGICAL = {1: 'STRING', 2: 'MAP', 3: 'LIST', 4: 'ENUM', 5: 'DECIMAL', 6: 'DATE', 7: 'TIME', 8: 'TIMESTAMP', 10: 'INTEGER', 11: 'NULL', 12: 'JSON', 13: 'BSON', 14: 'UUID', 15: 'FLOAT16'}
+
+
+def parquet_leaves(schema):
+    """Leaf columns of a Parquet schema (a depth-first list of elements) as (dotted path, element, repeated): a leaf under a
+    repeated group (a list) counts list elements, not rows."""
+    leaves, position = [], 1
+
+    def walk(prefix, count, repeated):
+        nonlocal position
+        for _ in range(count):
+            if position >= len(schema):
+                return
+            element = schema[position]
+            position += 1
+            name = element.get(4, b'').decode('utf-8', 'replace')
+            inside = repeated or element.get(3) == 2
+            if element.get(5):
+                walk(prefix + [name], element[5], inside)
+            else:
+                leaves.append(('.'.join(prefix + [name]), element, inside))
+    walk([], schema[0].get(5, len(schema) - 1) if schema else 0, False)
+    return leaves
+
+
+def parquet_type(element):
+    """(declared type, inferred kind, timestamp unit) of a Parquet leaf column."""
+    physical = PARQUET_PHYSICAL.get(element.get(1), 'UNKNOWN')
+    logical = element.get(10) or {}
+    name = next((PARQUET_LOGICAL[k] for k in logical if k in PARQUET_LOGICAL), None) or PARQUET_CONVERTED.get(element.get(6))
+    unit = None
+    if 8 in logical:
+        unit = next(({1: 'ms', 2: 'us', 3: 'ns'}[k] for k in (logical[8].get(2) or {}) if k in (1, 2, 3)), None)
+    elif element.get(6) in (9, 10):
+        unit = 'ms' if element.get(6) == 9 else 'us'
+    declared = physical + (f'/{name}' + (f'({unit})' if unit else '') if name else '')
+    if name in ('STRING', 'UTF8', 'ENUM', 'JSON', 'UUID'):
+        kind = 'text'
+    elif name == 'DATE':
+        kind = 'date'
+    elif name in ('TIMESTAMP', 'TIMESTAMP_MILLIS', 'TIMESTAMP_MICROS') or physical == 'INT96':
+        kind = 'datetime'
+    elif name in ('TIME', 'TIME_MILLIS', 'TIME_MICROS'):
+        kind = 'time'
+    elif name == 'DECIMAL' or physical in ('FLOAT', 'DOUBLE'):
+        kind = 'number'
+    elif physical in ('INT32', 'INT64'):
+        kind = 'integer'
+    elif physical == 'BOOLEAN':
+        kind = 'boolean'
+    else:
+        kind = 'binary'
+    return declared, kind, unit, name == 'DECIMAL'
+
+
+def parquet_statistic(raw, physical, kind, unit):
+    """A footer min/max as a number or ISO time; None for text (cell values are not copied) and undecodable values."""
+    formats = {('INT32', 4): '<i', ('INT64', 8): '<q', ('FLOAT', 4): '<f', ('DOUBLE', 8): '<d'}
+    code = formats.get((physical, len(raw or b'')))
+    if code is None:
+        return None
+    value = struct.unpack(code, raw)[0]
+    try:
+        if kind == 'date':
+            return (datetime(1970, 1, 1) + timedelta(days=value)).date().isoformat()
+        if kind == 'datetime' and unit:
+            return (datetime(1970, 1, 1) + timedelta(microseconds=value * {'ms': 1000, 'us': 1, 'ns': 0.001}[unit])).strftime('%Y-%m-%d %H:%M:%S')
+    except (OverflowError, ValueError):
+        return None
+    if kind in ('integer', 'number') and not (isinstance(value, float) and (math.isnan(value) or math.isinf(value))):
+        return value
+    return None
+
+
+def parquet_table(handle, size, limits):
+    """A Parquet file from its footer: schema, row count and the per-column statistics the writer stored (values are not read)."""
+    if size < 12:
+        return {'state': 'skipped', 'reason': 'not_a_parquet_file'}
+    handle.seek(size - 8)
+    tail = handle.read(8)
+    if tail[4:] != b'PAR1':
+        return {'state': 'skipped', 'reason': 'not_a_parquet_file'}
+    length = struct.unpack('<I', tail[:4])[0]
+    if length > size - 12 or length > limits['max_decompressed_bytes_per_file']:
+        return {'state': 'skipped', 'reason': 'parquet_footer_over_parse_budget'}
+    handle.seek(size - 8 - length)
+    meta = Compact(handle.read(length)).struct()
+    groups = meta.get(4, [])
+    chunks = {}
+    for group in groups:
+        for chunk in group.get(1, []):
+            info = chunk.get(3) or {}
+            chunks.setdefault('.'.join(p.decode('utf-8', 'replace') for p in info.get(3, [])), []).append(info)
+    columns = []
+    for path, element, repeated in parquet_leaves(meta.get(2, [])):
+        declared, kind, unit, decimal = parquet_type(element)
+        declared += ' list element' if repeated else ''
+        physical = PARQUET_PHYSICAL.get(element.get(1), 'UNKNOWN')
+        infos = chunks.get(path, [])
+        stats = [i.get(12) or {} for i in infos]
+        nulls_known = bool(infos) and all(st.get(3) is not None for st in stats)
+        nulls = sum(st.get(3, 0) for st in stats) if nulls_known else None
+        listed = sum(i.get(5, 0) for i in infos) if infos else None
+        column = {'name': path, 'declared_type': declared, 'type': kind, 'values': (listed - nulls) if nulls_known and listed is not None and not repeated else None,
+                  'missing': None if repeated else nulls, 'distinct': (stats[0].get(4) if len(stats) == 1 and stats[0].get(4) is not None else None), 'distinct_at_least': None, 'key_like': False}
+        if not decimal:
+            lows = [v for v in (parquet_statistic(st.get(6, st.get(2)), physical, kind, unit) for st in stats) if v is not None]
+            highs = [v for v in (parquet_statistic(st.get(5, st.get(1)), physical, kind, unit) for st in stats) if v is not None]
+            if lows and highs and kind in ('integer', 'number'):
+                column['numeric'] = {'min': min(lows), 'max': max(highs), 'mean': None, 'sd': None, 'median': None, 'median_is_estimate': False}
+            elif lows and highs and kind in ('date', 'datetime'):
+                column['time_range'] = [min(lows), max(highs)]
+        columns.append(column)
+    return {'state': 'profiled', 'format': 'Parquet', 'statistics': 'footer', 'rows': meta.get(3, 0), 'rows_are_lower_bound': False, 'profiled_rows': 0, 'ragged_rows': 0,
+            'row_groups': len(groups), 'columns': columns}
+
+
+XPT_LIBRARY = b'HEADER RECORD*******LIBRARY HEADER RECORD!!!!!!!'
+XPT_LIBRARY_V8 = b'HEADER RECORD*******LIBV8   HEADER RECORD!!!!!!!'
+XPT_MEMBER = b'HEADER RECORD*******MEMBER  HEADER RECORD!!!!!!!'
+XPT_NAMESTR = b'HEADER RECORD*******NAMESTR HEADER RECORD!!!!!!!'
+XPT_OBS = b'HEADER RECORD*******OBS     HEADER RECORD!!!!!!!'
+SAS_DATETIME_FORMATS = ('DATETIME', 'E8601DT', 'B8601DT', 'IS8601DT', 'DATEAMPM')
+SAS_DATE_FORMATS = ('DATE', 'YYMMDD', 'MMDDYY', 'DDMMYY', 'E8601DA', 'B8601DA', 'IS8601DA', 'WEEKDATE', 'WORDDATE', 'MONYY', 'YYMON', 'NLDATE')
+
+
+def ibm_float(raw):
+    """An IBM System/370 floating-point number as SAS transport stores it (2 to 8 bytes); None for SAS missing values."""
+    if len(raw) < 2:
+        return None
+    first = raw[0]
+    if not any(raw[1:]) and (first in (0x2e, 0x5f) or 0x41 <= first <= 0x5a):
+        return None
+    mantissa = int.from_bytes(raw[1:].ljust(7, b'\x00'), 'big')
+    if not mantissa:
+        return 0.0
+    value = mantissa / float(1 << 56) * 16.0 ** ((first & 0x7f) - 64)
+    return -value if first & 0x80 else value
+
+
+def sas_value(value, sas_format):
+    """A SAS numeric with a date or date-time format as ISO text; integral values as integers."""
+    try:
+        if sas_format.startswith(SAS_DATETIME_FORMATS):
+            return (datetime(1960, 1, 1) + timedelta(seconds=value)).strftime('%Y-%m-%d %H:%M:%S')
+        if sas_format.startswith(SAS_DATE_FORMATS):
+            return (datetime(1960, 1, 1) + timedelta(days=value)).date().isoformat()
+    except (OverflowError, ValueError):
+        return value
+    return int(value) if value == int(value) and abs(value) < 2 ** 53 else value
+
+
+def xpt_tables(data, options):
+    """Every dataset (member) of a SAS transport file (XPORT version 5) with its variables, labels and observations."""
+    if data.startswith(XPT_LIBRARY_V8):
+        return [], 'sas_transport_version_8_not_read'
+    if not data.startswith(XPT_LIBRARY):
+        head = data[:200].lstrip().lower()
+        return [], ('content_is_an_html_page_not_sas_transport' if head.startswith((b'<html', b'<!doctype', b'<head')) else 'not_sas_transport')
+    starts, position = [], data.find(XPT_MEMBER)
+    while position != -1:
+        if position % 80 == 0:
+            starts.append(position)
+        position = data.find(XPT_MEMBER, position + 1)
+    tables = []
+    for number, start in enumerate(starts):
+        block = data[start:starts[number + 1] if number + 1 < len(starts) else len(data)]
+        size = int(block[74:78] or b'140')
+        name = block[168:176].decode('latin-1').strip()
+        label = block[272:312].decode('latin-1').strip()
+        if not block[320:400].startswith(XPT_NAMESTR):
+            return tables, 'malformed_sas_transport'
+        count = int(block[374:378])
+        variables = []
+        for k in range(count):
+            raw = block[400 + k * size:400 + k * size + 140].ljust(140, b'\x00')
+            ntype, _, length, _, vname, vlabel, vformat, _, _, _, _, _, _, _, offset, _ = struct.unpack('>hhhh8s40s8shhh2s8shhl52s', raw)
+            variables.append({'name': vname.decode('latin-1').strip(), 'label': vlabel.decode('latin-1').strip(), 'format': vformat.decode('latin-1').strip().upper(),
+                              'numeric': ntype == 1, 'length': length, 'offset': offset})
+        observations = 400 + -(-count * size // 80) * 80
+        if not block[observations:observations + 80].startswith(XPT_OBS):
+            return tables, 'malformed_sas_transport'
+        region = block[observations + 80:]
+        width = max((v['offset'] + v['length'] for v in variables), default=0)
+        total = len(region) // width if width else 0
+        while total and (total - 1) * width >= len(region) - 80 and region[(total - 1) * width:total * width].strip(b' ') == b'':
+            total -= 1  # the space padding of the last 80-byte record is not an observation
+
+        def rows(region=region, variables=variables, width=width, total=total):
+            for k in range(total):
+                record = region[k * width:(k + 1) * width]
+                values = []
+                for v in variables:
+                    raw = record[v['offset']:v['offset'] + v['length']]
+                    if v['numeric']:
+                        value = ibm_float(raw)
+                        values.append(None if value is None else sas_value(value, v['format']))
+                    else:
+                        values.append(raw.decode('latin-1').rstrip())
+                yield values
+        declared = {v['name']: f"{'num' if v['numeric'] else 'char'}({v['length']})" + (f" {v['format']}" if v['format'] else '') for v in variables}
+        profile = profile_rows([v['name'] for v in variables], rows(), options, declared)
+        for column, v in zip(profile['columns'], variables):
+            if v['label']:
+                column['label'] = v['label']
+        tables.append({'state': 'profiled', 'format': 'SAS transport (XPORT v5)', 'sheet': name, 'dataset_label': label or None, **profile})
+    return tables, (None if tables else 'no_dataset_in_sas_transport')
+
+
+def is_archive_metadata(name):
+    parts = name.replace('\\', '/').split('/')
+    return '__MACOSX' in parts or parts[-1].startswith('._') or parts[-1].lower() in METADATA_NAMES
+
+
 def file_kind(name):
     lowered = name.lower()
+    if is_archive_metadata(name):
+        return 'metadata'
     if lowered.endswith(TABLE_SUFFIXES):
         return 'table'
     if lowered.endswith(('.arff', '.sparse_arff')):
@@ -402,6 +843,14 @@ def file_kind(name):
         return 'json'
     if lowered.endswith('.zip'):
         return 'zip'
+    if lowered.endswith(('.xlsx', '.xlsm')):
+        return 'xlsx'
+    if lowered.endswith('.parquet'):
+        return 'parquet'
+    if lowered.endswith('.xpt'):
+        return 'xpt'
+    if lowered.endswith(TEXT_TABLE_SUFFIXES) and not posixpath.basename(lowered).startswith(NOT_TABLE_STEMS):
+        return 'text_table'
     if lowered.endswith(ADAPTER_MISSING) or lowered.endswith(tuple(s + '.gz' for s in ADAPTER_MISSING)):
         return 'adapter_missing'
     return 'other'
@@ -439,6 +888,44 @@ def profile_json_file(binary, name, size, options, limits):
     return {'state': 'document', 'format': 'JSON document', 'top_level_keys': len(document) if isinstance(document, dict) else None}
 
 
+PARSE_ERRORS = (UnicodeError, csv.Error, ValueError, OSError, EOFError, zipfile.BadZipFile, sqlite3.Error, ET.ParseError, struct.error, KeyError, IndexError)
+
+
+def profile_named(kind, open_binary, name, size, options, limits, budget_tables):
+    """(tables, other-file label, skip reason) for one file or archive member of a table kind; `open_binary` opens it afresh.
+
+    Multi-table formats (workbook sheets, SAS transport members) name each table in its 'sheet' field."""
+    if kind in ('table', 'text_table', 'arff', 'ndjson'):
+        with open_binary() as binary, text_stream(binary, name) as stream:
+            result = (profile_csv(stream, name, options) if kind == 'table' else profile_text_table(stream, name, options) if kind == 'text_table'
+                      else profile_arff(stream, options) if kind == 'arff' else profile_records(stream, options, 'ndjson'))
+        if result['state'] == 'other':
+            return [], extension(name), None
+    elif kind == 'json':
+        with open_binary() as binary:
+            result = profile_json_file(binary, name, size, options, limits)
+        if result['state'] == 'document':
+            return [], 'json document', None
+    elif kind == 'xlsx':
+        if size > limits['max_decompressed_bytes_per_file']:
+            return [], None, 'workbook_over_parse_budget'
+        with open_binary() as binary:
+            tables, reason = xlsx_tables(binary, options, limits, budget_tables)
+        return tables, None, reason
+    elif kind == 'parquet':
+        with open_binary() as binary:
+            result = parquet_table(binary, size, limits)
+    elif kind == 'xpt':
+        if size > limits['max_decompressed_bytes_per_file']:
+            return [], None, 'transport_file_over_parse_budget'
+        with open_binary() as binary:
+            tables, reason = xpt_tables(binary.read(), options)
+        return tables[:budget_tables], None, reason
+    else:
+        raise ValueError('not_a_table_kind: ' + kind)
+    return ([result], None, None) if result['state'] == 'profiled' else ([], None, result['reason'])
+
+
 def profile_zip(path, options, limits, budget_tables):
     tables, others, skipped = [], Counter(), []
     with zipfile.ZipFile(path) as archive:
@@ -450,34 +937,27 @@ def profile_zip(path, options, limits, budget_tables):
                 continue
             member = info.filename
             kind = file_kind(member)
-            if kind in {'table', 'arff', 'ndjson', 'json'}:
+            if kind == 'metadata':
+                others[ARCHIVE_METADATA] += 1
+            elif kind in TABLE_KINDS:
                 if len(tables) >= budget_tables:
                     skipped.append({'member': member, 'reason': 'table_budget_for_dataset'})
                     continue
-                if info.file_size > limits['max_member_bytes_to_parse']:
+                if kind in RANDOM_ACCESS_KINDS and info.file_size > limits['max_member_bytes_to_parse']:
                     skipped.append({'member': member, 'bytes': info.file_size, 'reason': 'member_over_parse_budget'})
-                    continue
+                    continue  # read whole or by seeking; delimited tables are streamed whatever their size
+                opener = (lambda info=info: io.BytesIO(archive.read(info))) if kind in RANDOM_ACCESS_KINDS else (lambda info=info: archive.open(info))
                 try:
-                    with archive.open(info) as binary:
-                        if kind == 'table':
-                            with text_stream(binary, member) as stream:
-                                result = profile_csv(stream, member, options)
-                        elif kind == 'arff':
-                            with text_stream(binary, member) as stream:
-                                result = profile_arff(stream, options)
-                        elif kind == 'ndjson':
-                            with text_stream(binary, member) as stream:
-                                result = profile_records(stream, options, 'ndjson')
-                        else:
-                            result = profile_json_file(binary, member, info.file_size, options, limits)
-                except (UnicodeError, csv.Error, ValueError, OSError, zipfile.BadZipFile) as error:
-                    result = {'state': 'skipped', 'reason': 'parse_failed: ' + type(error).__name__}
-                if result['state'] == 'profiled':
-                    tables.append({'member': member, 'bytes': info.file_size, **result})
-                elif result['state'] == 'document':
-                    others['json document'] += 1
-                else:
-                    skipped.append({'member': member, 'reason': result['reason']})
+                    found, other, reason = profile_named(kind, opener, member, info.file_size, options, limits, budget_tables - len(tables))
+                except PARSE_ERRORS as error:
+                    found, other, reason = [], None, 'parse_failed: ' + type(error).__name__
+                for table in found:
+                    sheet = table.pop('sheet', None)
+                    tables.append({'member': member + (' → ' + sheet if sheet else ''), 'bytes': info.file_size, **table})
+                if other:
+                    others[other] += 1
+                if reason:
+                    skipped.append({'member': member, 'reason': reason})
             elif kind == 'adapter_missing':
                 skipped.append({'member': member, 'bytes': info.file_size, 'reason': 'format_adapter_missing'})
             else:
@@ -496,20 +976,20 @@ def profile_artifact(root, artifact, options, limits, budget_tables):
     if artifact.get('bytes') is not None and path.stat().st_size != artifact['bytes']:
         record['skipped'].append({'reason': 'size_differs_from_receipt'})
         return record
-    kind = file_kind(path.name)
+    kind = file_kind(rel)
     try:
-        if kind == 'table':
-            with path.open('rb') as binary, text_stream(binary, path.name) as stream:
-                result = profile_csv(stream, path.name, options)
-            record['tables'] = [{'member': None, 'bytes': artifact.get('bytes'), **result}] if result['state'] == 'profiled' else []
-            if result['state'] != 'profiled':
-                record['skipped'].append({'reason': result['reason']})
-        elif kind == 'arff':
-            with path.open('rb') as binary, text_stream(binary, path.name) as stream:
-                result = profile_arff(stream, options)
-            record['tables'] = [{'member': None, 'bytes': artifact.get('bytes'), **result}] if result['state'] == 'profiled' else []
-            if result['state'] != 'profiled':
-                record['skipped'].append({'reason': result['reason']})
+        if kind == 'metadata':
+            record['others'] = {ARCHIVE_METADATA: 1}
+        elif kind in TABLE_KINDS:
+            if budget_tables <= 0:
+                record['skipped'].append({'reason': 'table_budget_for_dataset'})
+                return record
+            found, other, reason = profile_named(kind, lambda: path.open('rb'), path.name, path.stat().st_size, options, limits, budget_tables)
+            record['tables'] = [{'member': table.pop('sheet', None), 'bytes': artifact.get('bytes'), **table} for table in found]
+            if other:
+                record['others'] = {other: 1}
+            if reason:
+                record['skipped'].append({'reason': reason})
         elif kind == 'sqlite':
             temporary = None
             try:
@@ -523,21 +1003,6 @@ def profile_artifact(root, artifact, options, limits, budget_tables):
             finally:
                 if temporary is not None:
                     temporary.unlink(missing_ok=True)
-        elif kind == 'ndjson':
-            with path.open('rb') as binary, text_stream(binary, path.name) as stream:
-                result = profile_records(stream, options, 'ndjson')
-            record['tables'] = [{'member': None, 'bytes': artifact.get('bytes'), **result}] if result['state'] == 'profiled' else []
-            if result['state'] != 'profiled':
-                record['skipped'].append({'reason': result['reason']})
-        elif kind == 'json':
-            with path.open('rb') as binary:
-                result = profile_json_file(binary, path.name, path.stat().st_size, options, limits)
-            if result['state'] == 'profiled':
-                record['tables'] = [{'member': None, 'bytes': artifact.get('bytes'), **result}]
-            elif result['state'] == 'document':
-                record['others'] = {'json document': 1}
-            else:
-                record['skipped'].append({'reason': result['reason']})
         elif kind == 'zip':
             tables, others, skipped = profile_zip(path, options, limits, budget_tables)
             record.update(tables=tables, others=dict(others), skipped=skipped)
@@ -545,7 +1010,7 @@ def profile_artifact(root, artifact, options, limits, budget_tables):
             record['skipped'].append({'reason': 'format_adapter_missing'})
         else:
             record['others'] = {extension(path.name): 1}
-    except (UnicodeError, csv.Error, ValueError, OSError, zipfile.BadZipFile, sqlite3.Error) as error:
+    except PARSE_ERRORS as error:
         record['skipped'].append({'reason': 'parse_failed: ' + type(error).__name__})
     return record
 
@@ -584,7 +1049,7 @@ def previous_profiles(root, options, limits):
             if not d.get('profiled'):
                 continue
             for a in d.get('artifacts', []):
-                if a.get('sha256') and not any(x.get('reason') in DISK_STATE_REASONS for x in a.get('skipped', [])):
+                if a.get('sha256') and not any(x.get('reason') in DISK_STATE_REASONS | BUDGET_REASONS for x in a.get('skipped', [])):
                     profiles.setdefault((a['sha256'], a['path'].rsplit('/', 1)[-1]), (a, folder == root))
     return profiles
 
@@ -615,7 +1080,7 @@ def collect(root, options=None, only=None, reuse=True):
                 if artifact['path'] not in cache:
                     previous = reusable.get((artifact.get('sha256'), artifact['path'].rsplit('/', 1)[-1]))
                     present = (root / artifact['path']).is_file() and (artifact.get('bytes') is None or (root / artifact['path']).stat().st_size == artifact['bytes'])
-                    if previous is not None and present:  # same bytes, name, options and code: the profile cannot differ
+                    if previous is not None and present and len(previous[0]['tables']) <= options['max_tables'] - tables_so_far:  # same bytes, name, options and code: the profile cannot differ
                         record, own = previous
                         cache[artifact['path']] = {**deepcopy(record), 'path': artifact['path']}
                         reused += 1
@@ -648,14 +1113,15 @@ def collect(root, options=None, only=None, reuse=True):
 
 def column_row(column):
     kind = column['type'] if not column.get('declared_type') else f"{column['declared_type']} → {column['type']}"
-    distinct = fmt_num(column['distinct']) if column['distinct'] is not None else (f"> {fmt_num(column['distinct_at_least'])}" if column.get('distinct_at_least') else '—')
+    distinct = fmt_num(column['distinct']) if column['distinct'] is not None else (f"≥ {fmt_num(column['distinct_at_least'])}" if column.get('distinct_at_least') else '—')
     if column.get('key_like'):
         distinct += ' (unique)'
     parts = []
     numeric = column.get('numeric')
     if numeric:
-        median = ('≈ ' if numeric['median_is_estimate'] else '') + fmt_num(numeric['median'])
-        parts.append(f"min {fmt_num(numeric['min'])} · median {median} · mean {fmt_num(round(numeric['mean'], 4))} · max {fmt_num(numeric['max'])}")
+        stats = [('min', numeric.get('min')), ('median', numeric.get('median')), ('mean', numeric.get('mean')), ('max', numeric.get('max'))]
+        parts.append(' · '.join(f"{label} {('≈ ' if label == 'median' and numeric.get('median_is_estimate') else '') + fmt_num(round(value, 4) if label == 'mean' else value)}"
+                                for label, value in stats if value is not None))
     if column.get('time_range'):
         parts.append(f"{column['time_range'][0]} … {column['time_range'][1]}")
     if column.get('labels'):
@@ -663,8 +1129,9 @@ def column_row(column):
     elif column.get('text_length') and not column.get('key_like'):
         parts.append(f"text length {column['text_length'][0]}–{column['text_length'][1]}")
     values = fmt_num(column['values']) if column['values'] is not None else '—'
-    missing = '—' if column['missing'] is None else (f"{column['missing'] / (column['values'] + column['missing']):.1%}" if column['values'] + column['missing'] else '—')
-    return f"| `{cell(column['name'], 40)}` | {cell(kind, 40)} | {values} | {missing} | {distinct} | {' · '.join(parts) or '—'} |"
+    missing = '—' if column['missing'] is None or column['values'] is None else (f"{column['missing'] / (column['values'] + column['missing']):.1%}" if column['values'] + column['missing'] else '—')
+    name = f"`{cell(column['name'], 40)}`" + (f" {cell(column['label'], 60)}" if column.get('label') else '')
+    return f"| {name} | {cell(kind, 48)} | {values} | {missing} | {distinct} | {' · '.join(p for p in parts if p) or '—'} |"
 
 
 def table_heading(table):
@@ -672,47 +1139,207 @@ def table_heading(table):
     note = ''
     if table.get('sparse'):
         note = ' · sparse ARFF: declarations only'
+    elif table.get('statistics') == 'footer':
+        note = f" · {fmt_num(table.get('row_groups'))} row group(s); schema and the writer's footer statistics, values not read"
     elif table['profiled_rows'] < table['rows']:
         note = f" · statistics from the first {fmt_num(table['profiled_rows'])} rows"
     if table.get('ragged_rows'):
         note += f" · {fmt_num(table['ragged_rows'])} rows with a different width"
     if table.get('resource_types'):
         note += ' · resource types: ' + ', '.join(f'{k} ({v})' for k, v in table['resource_types'].items())
+    if table.get('dataset_label'):
+        note += f" · dataset label: {cell(table['dataset_label'], 60)}"
     return f"{rows} rows × {len(table['columns'])} columns · {table['format']}{note}"
+
+
+REASON_TEXT = {
+    'format_adapter_missing': 'no reader for this format',
+    'table_budget_for_dataset': 'beyond the per-dataset table budget',
+    'archive_member_budget': 'beyond the archive member budget',
+    'member_over_parse_budget': 'archive member too large to read whole',
+    'json_document_over_parse_budget': 'JSON document too large to parse',
+    'workbook_over_parse_budget': 'workbook too large to read',
+    'transport_file_over_parse_budget': 'SAS transport file too large to read',
+    'parquet_footer_over_parse_budget': 'Parquet footer too large to read',
+    'binary_content_not_a_text_table': 'binary content, not a text table',
+    'html_is_not_tabular_data': 'an HTML page, not tabular data',
+    'content_is_an_html_page_not_sas_transport': 'an HTML page saved under a SAS transport name (upstream content, not data)',
+    'not_sas_transport': 'not a SAS transport file',
+    'sas_transport_version_8_not_read': 'SAS transport version 8, not read',
+    'malformed_sas_transport': 'malformed SAS transport file',
+    'not_a_parquet_file': 'not a Parquet file',
+    'not_an_excel_workbook': 'not an Excel workbook',
+    'no_sheet_with_data': 'a workbook without data rows',
+    'no_dataset_in_sas_transport': 'a SAS transport file without datasets',
+    'empty_file': 'empty file',
+    'json_items_are_not_objects': 'a JSON list of non-records',
+    'no_records': 'no records',
+    'no_arff_attributes': 'an ARFF file without attributes',
+    'decompression_budget': 'over the decompression budget',
+    'file_missing_on_disk': 'missing on disk',
+    'size_differs_from_receipt': 'size differs from the receipt',
+}
+
+
+def reason_text(reason):
+    if reason.startswith('parse_failed: '):
+        return 'could not be parsed (' + reason.split(': ', 1)[1] + ')'
+    return REASON_TEXT.get(reason, reason.replace('_', ' '))
+
+
+def table_name(path, table):
+    return path + ((' → ' + table['member']) if table.get('member') else '')
+
+
+def merge_columns(column_lists, label_levels):
+    """One column summary per position for tables with the same columns: counts add up, ranges widen, labels merge when complete."""
+    merged = []
+    for parts in zip(*column_lists):
+        first = parts[0]
+        kinds = Counter(p['type'] for p in parts)
+        values, missing = [p['values'] for p in parts], [p['missing'] for p in parts]
+        declared = {p.get('declared_type') for p in parts}
+        out = {'name': first['name'], 'declared_type': declared.pop() if len(declared) == 1 else 'varies',
+               'type': next(iter(kinds)) if len(kinds) == 1 else 'mixed (' + ', '.join(k for k, _ in kinds.most_common(2)) + ')',
+               'values': sum(values) if None not in values else None, 'missing': sum(missing) if None not in missing else None,
+               'distinct': None, 'distinct_at_least': max(((p['distinct'] if p['distinct'] is not None else p.get('distinct_at_least')) or 0) for p in parts) or None, 'key_like': False}
+        if first.get('label'):
+            out['label'] = first['label']
+        numbers = [(p['numeric'], p['values'] or 0) for p in parts if p.get('numeric')]
+        if numbers:
+            lows = [n['min'] for n, _ in numbers if n.get('min') is not None]
+            highs = [n['max'] for n, _ in numbers if n.get('max') is not None]
+            weight = sum(w for n, w in numbers)
+            mean = sum(n['mean'] * w for n, w in numbers) / weight if weight and all(n.get('mean') is not None for n, _ in numbers) else None
+            out['numeric'] = {'min': min(lows) if lows else None, 'max': max(highs) if highs else None, 'mean': mean, 'sd': None, 'median': None, 'median_is_estimate': False}
+        times = [p['time_range'] for p in parts if p.get('time_range')]
+        if times:
+            out['time_range'] = [min(t[0] for t in times), max(t[1] for t in times)]
+        lengths = [p['text_length'] for p in parts if p.get('text_length')]
+        if lengths:
+            out['text_length'] = [min(l[0] for l in lengths), max(l[1] for l in lengths)]
+        if all(p.get('labels') for p in parts):  # a table lists all its values when it has few: the union is exact
+            counts = Counter()
+            for p in parts:
+                for label in p['labels']:
+                    counts[label['value']] += label['count']
+            if len(counts) <= label_levels:
+                out['labels'] = [{'value': v, 'count': c} for v, c in counts.most_common()]
+                out['distinct'], out['distinct_at_least'] = len(counts), None
+        merged.append(out)
+    return merged
+
+
+def families_of(d, options, minimum=3):
+    """The dataset's tables as entries: tables with the same columns and format (per-patient files, yearly extracts) form one family
+    when there are at least `minimum`; the others stay single. Entries keep the order in which their first table appears."""
+    groups = {}
+    for a in d['artifacts']:
+        for t in a['tables']:
+            groups.setdefault((tuple(c['name'] for c in t['columns']), t['format']), []).append((table_name(a['path'], t), t))
+    entries = []
+    for members in groups.values():
+        if len(members) >= minimum and members[0][1]['columns']:
+            tables = [t for _, t in members]
+            folders = Counter(posixpath.dirname(n.split(' → ')[0]) or '.' for n, _ in members)
+            entries.append({'family': True, 'names': [n for n, _ in members], 'folders': folders, 'format': tables[0]['format'],
+                            'rows': sum(t['rows'] for t in tables), 'rows_are_lower_bound': any(t.get('rows_are_lower_bound') for t in tables),
+                            'columns': merge_columns([t['columns'] for t in tables], options['label_levels'])})
+        else:
+            entries.extend({'family': False, 'names': [n], 'table': t} for n, t in members)
+    return entries
+
+
+def dataset_base(d):
+    """The folder the dataset's held files share, so composition paths read from the release's own root."""
+    folders = [posixpath.dirname(a['path']) for a in d['artifacts']]
+    return posixpath.commonpath(folders) if folders and all(f for f in folders) else ''
+
+
+def composition(d, limit=25):
+    """Per top-level folder of the release: files, bytes, tables and the main file formats."""
+    base = dataset_base(d)
+    rows = {}
+    for a in d['artifacts']:
+        rel = posixpath.relpath(a['path'], base) if base else a['path']
+        folder = rel.split('/', 1)[0] + '/' if '/' in rel else '(top level)'
+        row = rows.setdefault(folder, {'files': 0, 'bytes': 0, 'tables': 0, 'formats': Counter()})
+        row['files'] += 1
+        row['bytes'] += a.get('bytes') or 0
+        row['tables'] += len(a['tables'])
+        row['formats'][extension(a['path'])] += 1
+    out = ['| Folder | Files | Size | Tables | Main formats |', '|---|---|---|---|---|']
+    ordered = sorted(rows.items(), key=lambda item: (-item[1]['bytes'], item[0]))
+    for folder, row in ordered[:limit]:
+        formats = ', '.join(f'{n} {ext}' for ext, n in row['formats'].most_common(4))
+        out.append(f"| `{cell(folder, 60)}` | {fmt_num(row['files'])} | {fmt_bytes(row['bytes'])} | {fmt_num(row['tables'])} | {formats} |")
+    if len(ordered) > limit:
+        rest = [row for _, row in ordered[limit:]]
+        out.append(f"| … {fmt_num(len(rest))} more folders | {fmt_num(sum(r['files'] for r in rest))} | {fmt_bytes(sum(r['bytes'] for r in rest))} | {fmt_num(sum(r['tables'] for r in rest))} | |")
+    return base, out
+
+
+def entry_heading(d, number, entry):
+    if not entry['family']:
+        return f"#### {d['id']} · table {number} · `{cell(entry['names'][0], 140)}`", table_heading(entry['table'])
+    folders = ', '.join(f"`{cell(f, 50)}/` ({fmt_num(n)})" for f, n in entry['folders'].most_common(4)) + (' …' if len(entry['folders']) > 4 else '')
+    rows = ('≥ ' if entry['rows_are_lower_bound'] else '') + fmt_num(entry['rows'])
+    return (f"#### {d['id']} · table {number} · {fmt_num(len(entry['names']))} tables with the same {fmt_num(len(entry['columns']))} columns",
+            f"{rows} rows in total × {len(entry['columns'])} columns · {entry['format']} · in {folders} · e.g. `{cell(entry['names'][0], 100)}` · "
+            'statistics combined over the tables (distinct counts are the largest per table unless every value is listed)')
 
 
 def render_dataset(d, options):
     out = [f"### {d['id']} — {cell(d['name'], 120)}", '', f"<a id=\"{d['id'].lower()}\"></a>", '']
     where = ', '.join(f'`{loc}`' for loc in d['locators']) or 'see the dataset page'
-    others = ', '.join(f'{n} {ext}' for ext, n in d['others'].items()) or 'none'
+    metadata = d['others'].get(ARCHIVE_METADATA, 0)
+    others = ', '.join(f'{n} {ext}' for ext, n in d['others'].items() if ext != ARCHIVE_METADATA) or 'none'
     out.append(f"Held: {fmt_num(d['held_files'])} verified files ({fmt_bytes(d['held_bytes'])}) under {where}. Tables profiled: {fmt_num(d['tables'])} "
                f"({fmt_num(d['rows'])} rows, {fmt_num(d['columns'])} columns in total). Other files: {others}. "
                f"[Dataset page](DATASET_SELECTION.md#{d['id'].lower()}).")
     out.append('')
+    if metadata:
+        out += [f"{fmt_num(metadata)} archive metadata entries (macOS `__MACOSX/` resource forks, `.DS_Store`) are not data and were ignored.", '']
     if not d['profiled']:
         out += ['Not profiled in this run (restricted to other datasets); the counts above come from the receipt only.', '']
         return out
+    if d['held_files'] > 1 or any(a['path'].lower().endswith('.zip') for a in d['artifacts']):
+        base, table = composition(d)
+        out += [f"**Composition** (folders under `{cell(base, 100)}/`):" if base else '**Composition:**', ''] + table + ['']
     if d['skipped']:
-        reasons = Counter(s['reason'] for s in d['skipped'])
-        out.append('Not profiled: ' + '; '.join(f"{n} file(s): {r.replace('_', ' ')}" for r, n in reasons.most_common()) + '.')
-        out.append('')
-    tables = [(a['path'], t) for a in d['artifacts'] for t in a['tables']]
-    if not tables:
-        out += ['No tabular file was found among the held files: the release is code, documentation, archives without tables or a format without an adapter.', '']
+        groups = {}
+        for item in d['skipped']:
+            groups.setdefault(item['reason'], []).append(posixpath.basename(item.get('member') or item['path']))
+        parts = []
+        for reason, names in sorted(groups.items(), key=lambda g: -len(g[1])):
+            examples = ', '.join(f'`{cell(n, 50)}`' for n in names[:3]) + (' …' if len(names) > 3 else '')
+            parts.append(f"{fmt_num(len(names))} file(s): {reason_text(reason)} ({examples})")
+        out += ['Not profiled: ' + '; '.join(parts) + '.', '']
+    entries = families_of(d, options)
+    if not entries:
+        out += ['No tabular file was found among the held files: the release is code, documentation, archives without tables or a format without a reader (see the composition above).', '']
         return out
-    out += ['<details>', f"<summary>{fmt_num(len(tables))} tables, column by column</summary>", '']
-    for number, (path, table) in enumerate(tables[:options['rendered_tables']], 1):
-        name = path + ((' → ' + table['member']) if table.get('member') else '')
-        out += [f"#### {d['id']} · table {number} · `{cell(name, 140)}`", '', table_heading(table), '', '| Column | Type | Values | Missing | Distinct | Summary |', '|---|---|---|---|---|---|']
-        out += [column_row(c) for c in table['columns'][:options['rendered_columns']]]
-        if len(table['columns']) > options['rendered_columns']:
-            out.append(f"| … | | | | | {fmt_num(len(table['columns']) - options['rendered_columns'])} more columns in the JSON record |")
+    tables = sum(len(e['names']) for e in entries)
+    summary = f"{fmt_num(tables)} tables" + (f" in {fmt_num(len(entries))} entries (tables with the same columns combined)" if len(entries) < tables else '') + ', column by column'
+    out += ['<details>', f"<summary>{summary}</summary>", '']
+    for number, entry in enumerate(entries[:options['rendered_tables']], 1):
+        heading, line = entry_heading(d, number, entry)
+        columns = entry['columns'] if entry['family'] else entry['table']['columns']
+        out += [heading, '', line, '', '| Column | Type | Values | Missing | Distinct | Summary |', '|---|---|---|---|---|---|']
+        out += [column_row(c) for c in columns[:options['rendered_columns']]]
+        if len(columns) > options['rendered_columns']:
+            out.append(f"| … | | | | | {fmt_num(len(columns) - options['rendered_columns'])} more columns in the [variable dictionary](DATASET_VARIABLES.csv) |")
         out.append('')
-    if len(tables) > options['rendered_tables']:
-        out += [f"{fmt_num(len(tables) - options['rendered_tables'])} more tables, listed without columns:", '', '| Table | Rows | Columns | Format |', '|---|---|---|---|']
-        for path, table in tables[options['rendered_tables']:]:
-            name = path + ((' → ' + table['member']) if table.get('member') else '')
-            out.append(f"| `{cell(name, 120)}` | {('≥ ' if table.get('rows_are_lower_bound') else '') + fmt_num(table['rows'])} | {fmt_num(len(table['columns']))} | {table['format']} |")
+    if len(entries) > options['rendered_tables']:
+        out += [f"{fmt_num(len(entries) - options['rendered_tables'])} more entries, listed here without columns (every column is in the [variable dictionary](DATASET_VARIABLES.csv)):", '',
+                '| Table | Rows | Columns | Format |', '|---|---|---|---|']
+        for entry in entries[options['rendered_tables']:]:
+            if entry['family']:
+                name, rows, width, fmt = f"{fmt_num(len(entry['names']))} tables like `{cell(entry['names'][0], 100)}`", ('≥ ' if entry['rows_are_lower_bound'] else '') + fmt_num(entry['rows']), len(entry['columns']), entry['format']
+            else:
+                t = entry['table']
+                name, rows, width, fmt = f"`{cell(entry['names'][0], 120)}`", ('≥ ' if t.get('rows_are_lower_bound') else '') + fmt_num(t['rows']), len(t['columns']), t['format']
+            out.append(f"| {name} | {rows} | {fmt_num(width)} | {fmt} |")
         out.append('')
     out += ['</details>', '']
     return out
@@ -756,7 +1383,9 @@ def render(data):
            'Deterministic and offline: no model calls, no network. Statistics are aggregates over the held files; no cell values are copied except the labels of columns with '
            f"at most {options['label_levels']} distinct values. Column statistics use the first {fmt_num(options['max_rows'])} rows of a table; row counts are complete unless marked ≥.", '',
            'This document grants no data or AI-use permission. Column names, labels and statistics are a dictionary-like derivative of the sources: before a model reads them, '
-           'the same source-bound preflight applies as to the files themselves (see [Licensing](DATA_LICENSES_AND_AI_USE.md)).', '']
+           'the same source-bound preflight applies as to the files themselves (see [Licensing](DATA_LICENSES_AND_AI_USE.md)).', '',
+           '**Variable dictionary:** [DATASET_VARIABLES.csv](DATASET_VARIABLES.csv) lists every column of every profiled table, one row per column (tables with the same columns '
+           'as one entry), with its type, missingness, distinct values and ranges, for filtering in a spreadsheet. It is a derivative of the data under the same terms.', '']
     if data.get('reused_artifacts'):
         out += [f"{fmt_num(data['reused_artifacts'])} file profiles were reused from the previous census"
                 + (f" ({fmt_num(data['reused_from_other_studies'])} of them from other studies' censuses of the same bytes)" if data.get('reused_from_other_studies') else '')
@@ -766,14 +1395,20 @@ def render(data):
                 'Run `Scripts/validate_dataset_workspace.py` and `Scripts/document_dataset_selection.py`, then this report again, so every acquired file is profiled.', '']
     out += ['## At a glance', '', '| Dataset | Held files | Tables | Rows | Columns | Other files | Not profiled |', '|---|---|---|---|---|---|---|']
     for d in sorted(held, key=lambda x: x['id']):
-        others = sum(d['others'].values())
+        others = sum(n for ext, n in d['others'].items() if ext != ARCHIVE_METADATA)
         out.append(f"| [{d['id']}](#{d['id'].lower()}) | {fmt_num(d['held_files'])} ({fmt_bytes(d['held_bytes'])}) | {fmt_num(d['tables'])} | {fmt_num(d['rows'])} | {fmt_num(d['columns'])} | {fmt_num(others)} | {fmt_num(len(d['skipped']))} |")
     out += ['', f"Not held ({fmt_num(len(not_held))}): " + ', '.join(f"[{d['id']}](#{d['id'].lower()})" for d in sorted(not_held, key=lambda x: x['id'])) + '. See [Before you apply](#before-you-apply-what-is-known-about-the-datasets-that-are-not-held).' if not_held else '', '']
     out += ['## How to read the tables', '',
             '- **Type** is inferred from the values (integer, number, date, datetime, boolean, text; mixed when kinds disagree) or, for ARFF and SQLite, the declared type followed by the inferred one.',
             '- **Values** and **Missing** count non-missing cells and the share of missing cells (empty, NA, NULL, ?). **Distinct** counts different values; (unique) marks a column whose values never repeat, a candidate key.',
             '- **Summary** gives min, median, mean and max for numbers (≈ marks a median estimated from a sample), the first and last timestamp for dates, the labels and counts of low-cardinality columns, and the text length range otherwise.',
-            '- Files inside ZIP archives are profiled when they are tables within the parse budget; code, documentation, images and formats without an adapter are only counted.', '']
+            '- **Composition** lists, per folder of the release, the files, their size, the tables found in them and the main file formats.',
+            '- Tables with the same columns and format (per-patient files, yearly or per-site extracts) are combined into one entry when there are at least three: rows and missing values add up, '
+            'ranges widen, labels merge when each table lists all its values, and distinct counts are otherwise the largest per table (≥).',
+            '- Excel workbooks are read sheet by sheet with the first non-empty row as the header and Excel dates converted; Parquet files are described from their footer (schema, row count, '
+            'the null counts and ranges the writer stored; values are not read); SAS transport files list each dataset with its variable labels and SAS dates converted.',
+            '- Files inside ZIP archives are profiled like files on disk; delimited tables are streamed whatever their size, other formats are read whole up to the member budget. '
+            'Code, documentation, images and formats without a reader are only counted; archive metadata (`__MACOSX/`, `.DS_Store`) is ignored.', '']
     if held:
         out += ['## Held datasets', '']
         for d in sorted(held, key=lambda x: x['id']):
@@ -785,6 +1420,46 @@ def render(data):
         for d in sorted(not_held, key=lambda x: x['id']):
             out += render_not_held(d, by_id)
     return '\n'.join(out)
+
+
+DICTIONARY_FIELDS = ['dataset_id', 'dataset_name', 'table', 'tables_with_these_columns', 'format', 'rows', 'column', 'label', 'declared_type', 'type', 'values', 'missing',
+                     'missing_share', 'distinct', 'unique', 'min', 'median', 'mean', 'max', 'first_time', 'last_time', 'labels', 'text_length']
+
+
+def spreadsheet_safe(value):
+    """Text that a spreadsheet would read as a formula is prefixed with an apostrophe; numbers stay numbers."""
+    text = '' if value is None else str(value)
+    if text[:1] in ('=', '+', '-', '@', '\t', '\r') and not FLOAT_RE.match(text):
+        return "'" + text
+    return text
+
+
+def write_dictionary(data, target):
+    """One row per column of every profiled table of the held datasets (tables with the same columns as one entry)."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open('w', newline='', encoding='utf-8') as stream:
+        writer = csv.DictWriter(stream, DICTIONARY_FIELDS)
+        writer.writeheader()
+        for d in sorted((x for x in data['datasets'] if x['held_files'] and x['profiled']), key=lambda x: x['id']):
+            for entry in families_of(d, data['options']):
+                if entry['family']:
+                    name, count, fmt, rows, columns = f"{entry['names'][0]} (and {len(entry['names']) - 1} more with the same columns)", len(entry['names']), entry['format'], entry['rows'], entry['columns']
+                else:
+                    t = entry['table']
+                    name, count, fmt, rows, columns = entry['names'][0], 1, t['format'], t['rows'], t['columns']
+                for c in columns:
+                    numeric, present = c.get('numeric') or {}, c['values']
+                    writer.writerow({'dataset_id': d['id'], 'dataset_name': spreadsheet_safe(d['name']), 'table': spreadsheet_safe(name), 'tables_with_these_columns': count, 'format': fmt,
+                                     'rows': rows, 'column': spreadsheet_safe(c['name']), 'label': spreadsheet_safe(c.get('label')), 'declared_type': spreadsheet_safe(c.get('declared_type')),
+                                     'type': c['type'], 'values': '' if present is None else present, 'missing': '' if c['missing'] is None else c['missing'],
+                                     'missing_share': f"{c['missing'] / (present + c['missing']):.4f}" if present is not None and c['missing'] is not None and present + c['missing'] else '',
+                                     'distinct': c['distinct'] if c['distinct'] is not None else (f">={c['distinct_at_least']}" if c.get('distinct_at_least') else ''),
+                                     'unique': 'yes' if c.get('key_like') else '', 'min': '' if numeric.get('min') is None else numeric['min'],
+                                     'median': '' if numeric.get('median') is None else numeric['median'], 'mean': '' if numeric.get('mean') is None else round(numeric['mean'], 6),
+                                     'max': '' if numeric.get('max') is None else numeric['max'], 'first_time': (c.get('time_range') or ['', ''])[0], 'last_time': (c.get('time_range') or ['', ''])[1],
+                                     'labels': spreadsheet_safe('; '.join(f"{l['value']} ({l['count']})" for l in c.get('labels') or [])),
+                                     'text_length': f"{c['text_length'][0]}-{c['text_length'][1]}" if c.get('text_length') else ''})
+    return target
 
 
 def write_document(root=ROOT, options=None, only=None, reuse=True):
@@ -803,8 +1478,11 @@ def write_document(root=ROOT, options=None, only=None, reuse=True):
               'datasets': [{k: v for k, v in d.items() if k != 'preaccess'} for d in data['datasets']]}
     structure = folder / 'structure.json'
     structure.write_text(json.dumps(record, indent=1, ensure_ascii=False, default=str) + '\n')
+    variables = write_dictionary(data, root / 'docs/DATASET_VARIABLES.csv')
+    shutil.copyfile(variables, folder / 'variables.csv')
     (root / 'data/interim/dataset_structure/latest.json').write_text(json.dumps(
         {'run': stamp, 'structure': str(structure.relative_to(root)), 'structure_sha256': digest(structure), 'document': 'docs/DATASET_STRUCTURE.md', 'document_sha256': digest(doc),
+         'variables': 'docs/DATASET_VARIABLES.csv', 'variables_sha256': digest(variables),
          'summary': {'datasets': len(data['datasets']), 'held': sum(1 for d in data['datasets'] if d['held_files']), 'tables': sum(d['tables'] for d in data['datasets']),
                      'rows': sum(d['rows'] for d in data['datasets']), 'columns': sum(d['columns'] for d in data['datasets']), 'not_profiled': sum(len(d['skipped']) for d in data['datasets'])}},
         indent=2) + '\n')
@@ -826,7 +1504,13 @@ def main(argv=None, root=ROOT):
               'reused_from_other_studies': data['reused_from_other_studies']}
     if args.report:
         from report_dataset_status import save_report
-        result['report'] = str(save_report(root, doc, title='Data structure: tables, columns, types and statistics', stem='dataset-structure', runs_dir='structure_reports'))
+        from datetime import date
+        dated = root / 'reports' / f'dataset-variables-{date.today().isoformat()}.csv'
+        dated.parent.mkdir(exist_ok=True)
+        shutil.copyfile(root / 'docs/DATASET_VARIABLES.csv', dated)
+        result['report'] = str(save_report(root, doc, title='Data structure: tables, columns, types and statistics', stem='dataset-structure', runs_dir='structure_reports',
+                                           links={'DATASET_VARIABLES.csv': dated.name}))
+        result['variables'] = str(dated)
     print(json.dumps(result))
     return result
 
