@@ -7,7 +7,7 @@
   switcher.replaceChildren();
   for(const study of api.all()){const o=document.createElement('option');o.value=study.id;o.textContent=study.name;o.selected=study.id===api.current().id;switcher.append(o);}
   // Other registered studies live in their own generated sites: choosing one opens that site.
-  const others=(seed.workspaces||[]).filter(w=>!w.current);
+  const others=(seed.workspaces||[]).filter(w=>!w.current&&w.href);  // a registered study without a built site cannot be opened yet
   if(others.length){const group=document.createElement('optgroup');group.label='Other registered studies';
    for(const w of others){const o=document.createElement('option');o.value='workspace:'+w.id;o.textContent=w.name;o.dataset.href=w.href;group.append(o);}
    switcher.append(group);}

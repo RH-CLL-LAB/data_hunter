@@ -19,3 +19,10 @@ ul.actsteps .mark{position:absolute;left:0;top:4px;width:11px;height:11px;border
 /* Merge facts panel (Research studies): the plan wraps instead of widening the page; the study select stays inside the panel. */
 #merge-facts select{max-width:100%}
 #merge-facts pre{white-space:pre-wrap;word-break:break-word;max-height:28rem;overflow:auto}
+
+/* Your studies (Research studies): the tick, counts and Open columns stay narrow; the study name takes the room. */
+.studylist{width:100%;min-width:0;table-layout:auto;border-collapse:collapse}
+.studylist th,.studylist td{padding:10px 12px;vertical-align:top;text-align:left;min-width:0}
+.studylist th:not(:nth-child(2)),.studylist td:not(:nth-child(2)){width:1%;white-space:nowrap}
+.studylist td:nth-child(2){width:auto;white-space:normal}
+.studylist td:nth-child(3),.studylist td:nth-child(4){text-align:right}

@@ -130,7 +130,8 @@ instruction or permission to expand another dataset.
    Data structure report with `Scripts/report_dataset_structure.py --report` (the page is already current;
    the census is a deterministic column and statistics census of the held files, unchanged files reuse
    their last profile, and its output is dictionary-like source content that stays under the
-   AI preflight). Run relevant deterministic tests. Do not
+   AI preflight; the report reads Excel, Parquet, SAS transport and delimited `.txt` tables and writes the
+   variable dictionary `docs/DATASET_VARIABLES.csv`, which `--report` saves next to the dated copy). Run relevant deterministic tests. Do not
    declare successful registration until the regenerated receipt/catalogue agrees
    and the entry is visible. If validation fails, preserve the failed receipt,
    report the blocker and leave readiness conservative.
@@ -232,11 +233,14 @@ conflicts and left alone. Briefs, shortlists, annotations, licence assets, locks
 and manual licence decisions never cross, and the merge grants no permission: the study's own
 licence review and preflight still decide. Files are acquired separately (the resolver, or
 `--reuse-from-study` or the saved `reuse_held_files` option). The script writes `runs/merge_study_facts/<stamp>/`
-and logs a note in both studies' `actions.jsonl`. The Research studies page's “Merge facts from another study”
-control previews the plan through the local server and saves a `datahunter_study_facts_merge_request`; run it
-with `merge_study_facts.py --request FILE` (dry run) and `--apply`. The request names source and target and
-carries the reviewer's tick; the plan is recomputed from the current registries, so a stale request can only
-merge less, and conflicts are never overwritten.
+and logs a note in both studies' `actions.jsonl`. The Research studies page lists every registered study with
+tick boxes; “Merge studies into a new study” takes the ticked studies and a new brief, previews what each brings
+through the local server and saves a `datahunter_study_facts_merge_request` with `sources` and `new_study`. Run
+it with `merge_study_facts.py --request FILE` (dry run) and `--apply`: the script creates and registers the new
+study, merges the sources' facts in tick order (the first wins where two disagree; the differing record is
+reported and left out) and builds its catalogue, status document and site. The brief is the user's: never
+write or change it for them. The new study holds no files: acquire them with a full-release download that
+ticks “Reuse files another study already holds”, and decide its unreviewed licence records before any AI use.
 
 Include the research brief in subsequent download and manual-review handoffs.
 Run source-bound preflight with `DATA_HUNTER_STUDY_ID` for this study; no other

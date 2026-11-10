@@ -3,6 +3,7 @@
 
     python Scripts/merge_study_facts.py --source harmonization-test                  # dry run into the active study
     python Scripts/merge_study_facts.py --source harmonization-test --target my-study --apply
+    python Scripts/merge_study_facts.py --request datahunter-merged-study-<id>.json --apply   # a new study from several, saved by the site
 
 What crosses over, and how:
 - catalogue entries (configs/dataset_study_usage.json, `datasets`) the target lacks, added as pre-access entries:
@@ -34,6 +35,8 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
+import subprocess
 from pathlib import Path
 import re
 import shutil
@@ -41,7 +44,8 @@ import sys
 
 CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CODE_ROOT / 'src'))
-from datahunter.workspace import valid_id, workspace_root, require_workspace, study_path, is_study_workspace, workspace_study_id, STUDIES  # noqa: E402
+from datahunter.workspace import (valid_id, workspace_root, require_workspace, study_path, is_study_workspace, workspace_study_id, STUDIES,  # noqa: E402
+                                  active_study_id, set_active, create_study_workspace)
 from datahunter.research_studies import append_log, registered, fingerprint  # noqa: E402
 ROOT = workspace_root(default=CODE_ROOT)
 
@@ -438,6 +442,142 @@ def validate_request(request, expected_target=None):
     return source, target
 
 
+BRIEF_FIELDS = ('id', 'name', 'question', 'intended_use', 'population', 'targets', 'inclusion', 'exclusion')
+BRIEF_LIMITS = {'id': 80, 'name': 160}
+REFRESH_STEPS = (('validate_dataset_workspace.py',), ('document_dataset_selection.py', '--skip-structure'))  # receipt, catalogue, status and site of the new study
+
+
+def inventory(folder, study_id):
+    """What a study workspace holds for a merge: counts and ids of its catalogue entries, papers, licence records, screens, notices and held files."""
+    usage, selection, _, policy = [read(folder / 'configs' / name) for name in REGISTRIES]
+    lock_path = folder / 'configs/research_resources.lock.json'
+    lock = read(lock_path)['files'] if lock_path.exists() else []
+    study = registered(folder, study_id) or {}
+    notices = [p for p in (folder / 'data/raw').rglob('notices/*') if p.is_file()] if (folder / 'data/raw').is_dir() else []
+    return {'study': study_id, 'name': study.get('name', study_id), 'datasets': len(usage['datasets']), 'held_datasets': sum(1 for d in usage['datasets'] if is_held(d)),
+            'papers': len(usage['studies']), 'licence_records': len(policy['resources']),
+            'terms_screens': len(selection.get('preaccess_license_policy', {}).get('reviews', [])), 'notices': len(notices),
+            'held_files': len(lock), 'held_bytes': sum(f.get('bytes', 0) for f in lock),
+            'ids': {'datasets': sorted(d['id'] for d in usage['datasets']), 'papers': sorted(p['id'] for p in usage['studies']), 'licences': sorted(r['id'] for r in policy['resources'])}}
+
+
+def merged_study_preview(sources):
+    """The site's preview for a merged study: each source's inventory and the ids more than one source carries (the first
+    ticked study's facts win; a later differing record is reported as a conflict when the merge runs). Nothing is written."""
+    found = [workspace(name) for name in sources]
+    items = [inventory(folder, study_id) for folder, study_id in found]
+    overlaps = {}
+    for kind in ('datasets', 'papers', 'licences'):
+        seen = {}
+        for item in items:
+            for identifier in item['ids'][kind]:
+                seen.setdefault(identifier, []).append(item['study'])
+        overlaps[kind] = sorted(identifier for identifier, studies in seen.items() if len(studies) > 1)
+    for item in items:
+        del item['ids']
+    return {'sources': items, 'overlaps': overlaps, 'totals': {k: sum(i[k] for i in items) for k in ('datasets', 'papers', 'licence_records', 'terms_screens', 'notices', 'held_files', 'held_bytes')},
+            'data_permission_granted': False, 'files': 'Held files are not copied by the merge: export a full-release download with “Reuse files another study already holds” from the merged study’s site.'}
+
+
+def validate_merged_study_request(request):
+    """Sources and brief of a request that creates a new study from several studies' facts (the Research studies page's
+    “Merge studies into a new study”). Returns (source workspaces, brief). Nothing is written here."""
+    if not isinstance(request, dict) or request.get('schema_version') != 1 or request.get('kind') != REQUEST_KIND:
+        raise ValueError('unsupported_study_facts_merge_request')
+    if request.get('reviewed') is not True:
+        raise ValueError('reviewer_confirmation_required')
+    sources = request.get('sources')
+    if not isinstance(sources, list) or not sources or len(sources) > 20 or any(not isinstance(s, str) or not valid_id(s) for s in sources) or len(set(sources)) != len(sources):
+        raise ValueError('invalid_merge_sources')
+    brief = request.get('new_study')
+    if not isinstance(brief, dict) or not valid_id(brief.get('id')):
+        raise ValueError('invalid_merged_study_id')
+    for field in BRIEF_FIELDS:
+        value = brief.get(field, '')
+        if not isinstance(value, str) or len(value) > BRIEF_LIMITS.get(field, 4000) or (field in ('id', 'name', 'question', 'intended_use') and not value.strip()):
+            raise ValueError('invalid_merged_study_' + field)
+    if brief['id'] in sources:
+        raise ValueError('merged_study_is_a_source')
+    if study_path(brief['id']).exists():
+        raise ValueError('merged_study_exists: ' + brief['id'])
+    found = [workspace(name)[0] for name in sources]
+    return found, {field: brief.get(field, '').strip() for field in BRIEF_FIELDS}
+
+
+def refresh_workspace(folder):
+    """Receipt, catalogue documents, status document and site of a workspace, through the usual scripts. The workspace is
+    named by its folder, so the active-study pointer is neither read nor changed."""
+    env = {k: v for k, v in os.environ.items() if k != 'DATA_HUNTER_STUDY'}
+    env['DATA_HUNTER_WORKSPACE'] = str(folder)
+    for step in REFRESH_STEPS:
+        done = subprocess.run([sys.executable, str(CODE_ROOT / 'Scripts' / step[0]), *step[1:]], cwd=CODE_ROOT, env=env, capture_output=True, text=True)
+        if done.returncode:
+            raise RuntimeError(f'{step[0]} failed for {Path(folder).name}: ' + (done.stderr or done.stdout)[-1500:])
+
+
+def create_merged_study(sources, brief, request, apply=False, refresh=True):
+    """A new study workspace registered with `brief`, holding the facts of every source in order. Dry run: the preview only."""
+    preview = merged_study_preview([f.name for f in sources])
+    report = {'schema_version': 1, 'kind': 'datahunter_merged_study_report', 'at': now(), 'applied': False, 'study_id': brief['id'],
+              'sources': [f.name for f in sources], 'preview': preview, 'data_permission_granted': False, 'model_calls': 0,
+              'next': ('Open the merged study’s site, tick its datasets and export a full-release download with “Reuse files another study already holds”; '
+                       'the resolver then copies the files the sources hold, under the new study’s own gates. Licence records arrived unreviewed: decide them per dataset before any AI use.')}
+    if not apply:
+        return report
+    folder = create_study_workspace(brief['id'])
+    run = folder / 'runs/merge_study_facts' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    run.mkdir(parents=True)
+    write(run / 'site-request.json', request)
+    registration = {'schema_version': 1, 'kind': 'datahunter_research_study', 'study': brief, 'dataset_ids': [], 'dataset_annotations': {}, 'study_annotations': {},
+                    'log': [{'at': now(), 'action': 'note', 'detail': 'Created from the Research studies page as a merge of studies ' + ', '.join(f.name for f in sources) + '; facts only, no files, no permission.'}]}
+    write(run / 'registration-request.json', registration)
+    sys.path.insert(0, str(CODE_ROOT / 'Scripts'))
+    from register_research_study import register
+    previous = active_study_id()
+    report['registration'] = register(run / 'registration-request.json', apply=True, root=folder)
+    if previous and previous != brief['id']:
+        try:
+            set_active(previous)  # creating a merged study is not a request to switch to it
+        except ValueError:
+            pass
+    report['merges'] = []
+    for source in sources:
+        merged = merge(source, folder, apply=True, site_request=request)
+        report['merges'].append({'source': source.name, 'run': merged['run'], 'counts': merged['counts']})
+    report['applied'] = True
+    report['run'] = str(run.relative_to(folder))
+    report['workspace'] = str(folder)
+    if refresh:
+        refresh_workspace(folder)
+        report['refreshed'] = True
+        if previous and previous != brief['id']:
+            try:
+                set_active(previous)
+            except ValueError:
+                pass
+    write(run / 'report.json', report)
+    return report
+
+
+def merged_summary_lines(report):
+    p = report['preview']
+    lines = [(f"Created study {report['study_id']} from " if report['applied'] else f"Dry run: would create study {report['study_id']} from ") + ', '.join(report['sources'])]
+    for item in p['sources']:
+        lines.append(f"- {item['study']}: {item['datasets']} catalogue entries ({item['held_datasets']} held), {item['papers']} papers, {item['licence_records']} licence records, "
+                     f"{item['terms_screens']} terms screens, {item['notices']} notices, {item['held_files']:,} held files ({item['held_bytes']:,} bytes)")
+    for kind, ids in p['overlaps'].items():
+        if ids:
+            lines.append(f"- {kind} in more than one source ({len(ids)}): the first source’s facts win, a differing later record is a conflict: " + ', '.join(ids[:25]) + (' …' if len(ids) > 25 else ''))
+    for m in report.get('merges', []):
+        c = m['counts']
+        lines.append(f"- merged {m['source']}: {c['datasets']['add']} entries, {c['papers']['add']} papers, {c['licences']['add']} licence records (unreviewed), {c['files']['copied']} notices; "
+                     f"{c['datasets']['conflict'] + c['papers']['conflict'] + c['licences']['conflict'] + c['files']['conflict']} conflicts left untouched (run {m['run']})")
+    if report.get('refreshed'):
+        lines.append('- catalogue, status document and site of the merged study built')
+    lines += ['- ' + p['files'], '- ' + report['next'], 'No file holdings and no AI-use permission cross over.']
+    return lines
+
+
 def plan_json(source, target):
     """The dry-run plan for the site's Merge control: counts, summary lines and conflicts. Nothing is written."""
     report = merge(source, target, apply=False, record=False)
@@ -481,11 +621,17 @@ def main(argv=None):
     what.add_argument('--request', type=Path, metavar='FILE', help='A datahunter_study_facts_merge_request saved by the Research studies page (names source and target)')
     parser.add_argument('--target', metavar='STUDY', help='Study id or workspace path that receives them (default: the active study)')
     parser.add_argument('--apply', action='store_true', help='Write the merge; without it the run only reports what would cross over')
+    parser.add_argument('--no-refresh', action='store_true', help='For a merged study: skip building its catalogue, status document and site afterwards')
     args = parser.parse_args(argv)
-    if args.target is None:
+    if args.target is None and not args.request:
         require_workspace(ROOT)
     if args.request:
         request = read(args.request)
+        if isinstance(request, dict) and 'sources' in request:  # the page's “Merge studies into a new study”
+            sources, brief = validate_merged_study_request(request)
+            report = create_merged_study(sources, brief, request, apply=args.apply, refresh=not args.no_refresh)
+            print('\n'.join(merged_summary_lines(report)))
+            return report
         source, target = validate_request(request, expected_target=args.target if args.target is not None else ROOT)
         report = merge(source, target, apply=args.apply, site_request=request)
     else:

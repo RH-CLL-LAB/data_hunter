@@ -536,8 +536,12 @@ def registered_workspaces(page):
         name=next((s.get('name') for s in registry.get('studies',[]) if s.get('id')==study_id),None)
         if not name:continue  # workspace created, brief not registered yet
         index=site_dir(folder)/'index.html'
-        if study_id!=current and not index.is_file():continue  # nothing to open until that site is built
-        rows.append({'id':study_id,'name':name,'current':study_id==current,'href':href(index,page)})
+        brief=next((s for s in registry.get('studies',[]) if s.get('id')==study_id),{})
+        lock=folder/'configs/research_resources.lock.json'
+        try:held=len(json.loads(lock.read_text())['files']) if lock.is_file() else 0
+        except (OSError,ValueError):held=0
+        rows.append({'id':study_id,'name':name,'current':study_id==current,'href':href(index,page) if index.is_file() else None,  # no site yet: listed, not openable
+                     'brief':{k:brief.get(k,'') for k in ('question','intended_use','population','targets','inclusion','exclusion')},'held_files':held,'reports':len(brief.get('reports',[]))})
     return rows
 
 
@@ -819,15 +823,21 @@ def workflow_schema():
 
 RECORDS=[]
 def merge_panel():
-    """Merge facts from another registered study: the plan comes from the local server, the saved request goes to merge_study_facts.py."""
-    return ('<section class="panel" id="merge-facts" data-merge-panel><h2>Merge facts from another study</h2>'
-            '<p>Copies what another registered study found into <strong data-merge-target></strong>: catalogue entries as pre-access entries, paper records, selection placements, terms screens with no rights granted, retained notices by hash, and licence records with every operation unreviewed. Briefs, shortlists, annotations, held files, licence assets, approvals and manual licence decisions never cross, and a conflict is left as it is. Nothing here grants data or AI-use permission; copying files is the download dialog’s “Reuse files another study already holds”.</p>'
-            '<p><label for="merge-source">Copy the facts of</label> <select id="merge-source" data-merge-source></select> <button type="button" class="plainbutton" data-merge-preview>Preview plan</button></p>'
+    """Your studies: every registered workspace with ticks, and the form that merges the ticked ones into a new study."""
+    return ('<section class="panel" id="your-studies" data-study-list><h2>Your studies'+help_button('help-your-studies','the study list','Every registered study workspace of this checkout. “Shown now” is the one this site belongs to; Open switches to another study’s own site, the same as the Study dropdown at the top. Tick two or more studies to merge their facts into a new study below. Drafts that exist only in this browser are in the Study dropdown until they are exported and registered.')+'</h2>'
+            '<table class="studylist"><thead><tr><th scope="col">Merge</th><th scope="col">Study</th><th scope="col">Held files</th><th scope="col">Reports</th><th scope="col"></th></tr></thead><tbody data-study-rows></tbody></table>'
+            '<p class="small" data-study-list-note></p></section>'
+            '<section class="panel" id="merge-facts" data-merge-panel><h2>Merge studies into a new study'+help_button('help-merge','merging studies','The new study receives, from every ticked study in order: catalogue entries as pre-access entries, paper records, selection placements, terms screens with no rights granted, retained notices by hash, and licence records with every operation unreviewed. The first ticked study’s facts win where two studies disagree; the differing record is reported and left out. Briefs, shortlists, annotations, held files, licence assets, approvals and manual decisions never cross. Files are copied afterwards by a download with “Reuse files another study already holds”. Nothing here grants data or AI-use permission.')+'</h2>'
+            '<p class="small">Tick the studies above, give the new study its own brief (permissions are bound to it), preview, then save the request for the agent.</p>'
+            '<form class="intake-form" data-merge-form>'
+            +''.join('<label>'+label+('<input' if name in {'id','name'} else '<textarea')+' name="'+name+'" maxlength="'+('80' if name=='id' else '160' if name=='name' else '4000')+'" placeholder="'+placeholder+'"'+(' required' if name in {'id','name','question','intended_use'} else '')+('>' if name in {'id','name'} else '></textarea>')+'</label>'
+                     for name,label,placeholder in [('id','New study ID','e.g. cll-and-medscrape-merged'),('name','New study name','Human-readable project name'),('question','Research question','What should the merged study establish?'),('intended_use','Intended data and AI use','Purpose, research/commercial scope and compute environment'),('population','Population / domain',''),('targets','Target variables / tasks',''),('inclusion','Include',''),('exclusion','Exclude','')])
+            +'<p><button type="button" class="plainbutton" data-merge-preview>Preview what crosses over</button></p>'
             '<pre class="small" data-merge-plan hidden></pre>'
-            '<label class="checkoption"><input type="checkbox" data-merge-reviewed><span>I reviewed the plan; conflicts stay as they are.</span></label>'
+            '<label class="checkoption"><input type="checkbox" data-merge-reviewed><span>I reviewed the preview; the first ticked study wins where two disagree.</span></label>'
             '<p class="small" role="status" data-merge-status></p>'
-            '<p><button type="button" class="agent-save" data-merge-save disabled>Save merge request</button></p>'
-            '<p class="small">Hand the saved file to Claude Code or Codex: <code>.venv/bin/python Scripts/merge_study_facts.py --request &lt;file&gt; --apply</code> validates it, prints the plan and applies it. The preview needs the local server (<code>python Scripts/serve.py</code>); a site opened from a file saves the request without it.</p></section>')
+            '<p><button type="submit" class="agent-save" data-merge-save>Save merge request</button></p></form>'
+            '<p class="small">Hand the saved file to Claude Code or Codex: <code>.venv/bin/python Scripts/merge_study_facts.py --request &lt;file&gt; --apply</code> creates and registers the study, merges the facts in order and builds its catalogue, status document and site. The preview needs the local server (<code>python Scripts/serve.py</code>).</p></section>')
 
 
 def tutorial_page():

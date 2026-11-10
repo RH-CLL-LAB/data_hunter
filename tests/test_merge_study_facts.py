@@ -267,6 +267,94 @@ class MergeStudyFactsTests(unittest.TestCase):
         self.assertFalse(report['applied'])
         self.assertEqual({k: v for k, v in snapshot(self.target).items() if 'runs/merge_study_facts' not in k}, before, 'a dry run writes only its run folder')
 
+    def studies_here(self):
+        """Point the studies folder and the active-study pointer at the fixture, never at the real checkout."""
+        import contextlib
+        import datahunter.workspace as workspace
+        stack = contextlib.ExitStack()
+        base = self.target.parent
+        stack.enter_context(patch.object(workspace, 'STUDIES', base))
+        stack.enter_context(patch.object(workspace, 'ACTIVE', base / '.active'))
+        stack.enter_context(patch.dict('os.environ', {}, clear=False))
+        import os
+        os.environ.pop('DATA_HUNTER_STUDY', None)
+        (base / '.active').write_text('target-study\n')
+        return stack
+
+    def merged_request(self, **changes):
+        brief = {'id': 'merged-study', 'name': 'Merged', 'question': 'Which datasets?', 'intended_use': 'Research', 'population': '', 'targets': '', 'inclusion': '', 'exclusion': ''}
+        return {'schema_version': 1, 'kind': module.REQUEST_KIND, 'sources': ['source-study', 'target-study'], 'new_study': brief, 'reviewed': True, **changes}
+
+    def test_merged_study_preview_lists_each_source_and_the_ids_they_share_without_writing(self):
+        write(self.target / 'configs/dataset_study_usage.json', {'schema_version': 1, 'reviewed_on': '2026-11-01', 'scope': 'fixture', 'studies': [self.paper], 'datasets': [dataset('HELD')]})
+        with self.studies_here():
+            before = snapshot(self.target.parent)
+            preview = module.merged_study_preview(['source-study', 'target-study'])
+            self.assertEqual(snapshot(self.target.parent), before, 'a preview writes nothing')
+        self.assertEqual([s['study'] for s in preview['sources']], ['source-study', 'target-study'])
+        self.assertEqual((preview['sources'][0]['datasets'], preview['sources'][0]['held_datasets'], preview['sources'][0]['papers']), (3, 1, 1))
+        self.assertEqual((preview['overlaps']['datasets'], preview['overlaps']['papers']), (['HELD'], ['paper_a']))
+        self.assertFalse(preview['data_permission_granted'])
+        self.assertNotIn('ids', preview['sources'][0], 'the preview carries counts, not every id')
+
+    def test_merged_study_request_is_validated_before_anything_is_created(self):
+        with self.studies_here():
+            for changes, error in [({'kind': 'other'}, 'unsupported_study_facts_merge_request'), ({'reviewed': False}, 'reviewer_confirmation_required'),
+                                   ({'sources': []}, 'invalid_merge_sources'), ({'sources': ['source-study', 'source-study']}, 'invalid_merge_sources'),
+                                   ({'sources': ['../x']}, 'invalid_merge_sources'),
+                                   ({'new_study': {**self.merged_request()['new_study'], 'id': 'Bad ID'}}, 'invalid_merged_study_id'),
+                                   ({'new_study': {**self.merged_request()['new_study'], 'question': ' '}}, 'invalid_merged_study_question'),
+                                   ({'new_study': {**self.merged_request()['new_study'], 'id': 'source-study'}}, 'merged_study_is_a_source'),
+                                   ({'new_study': {**self.merged_request()['new_study'], 'id': 'target-study'}}, 'merged_study_is_a_source')]:
+                with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, error):
+                    module.validate_merged_study_request(self.merged_request(**changes))
+            (self.target.parent / 'merged-study').mkdir()
+            with self.assertRaisesRegex(ValueError, 'merged_study_exists'):
+                module.validate_merged_study_request(self.merged_request())
+
+    def test_a_merged_study_is_created_registered_and_filled_from_every_source_in_order(self):
+        write(self.target / 'configs/dataset_study_usage.json', {'schema_version': 1, 'reviewed_on': '2026-11-01', 'scope': 'fixture', 'studies': [{**self.paper, 'title': 'Paper A, other title'}],
+                                                                  'datasets': [dataset('OTHER')]})
+        request = self.merged_request()
+        with self.studies_here():
+            sources, brief = module.validate_merged_study_request(request)
+            dry = module.create_merged_study(sources, brief, request, apply=False)
+            self.assertFalse(dry['applied'])
+            self.assertFalse((self.target.parent / 'merged-study').exists(), 'a dry run creates nothing')
+            source_before = snapshot(self.source)
+            report = module.create_merged_study(sources, brief, request, apply=True, refresh=False)
+            self.assertEqual((self.target.parent / '.active').read_text().strip(), 'target-study', 'creating a merged study does not switch the active study')
+            after = snapshot(self.source)
+            self.assertEqual({k: v for k, v in after.items() if k != 'actions.jsonl'}, {k: v for k, v in source_before.items() if k != 'actions.jsonl'}, 'a source study is only read, apart from its log')
+            self.assertIn(b'Facts copied into study merged-study', after['actions.jsonl'], 'the source logs where its facts went')
+        folder = self.target.parent / 'merged-study'
+        self.assertTrue(report['applied'])
+        registry = json.loads((folder / 'configs/research_studies.json').read_text())
+        self.assertEqual([(s['id'], s['question']) for s in registry['studies']], [('merged-study', 'Which datasets?')])
+        usage = json.loads((folder / 'configs/dataset_study_usage.json').read_text())
+        self.assertEqual(sorted(d['id'] for d in usage['datasets']), ['ABSENT', 'DEF', 'HELD', 'OTHER', 'PRE'] if any(d['id'] == 'ABSENT' for d in usage['datasets']) else ['DEF', 'HELD', 'OTHER', 'PRE'])
+        self.assertEqual([p['title'] for p in usage['studies']], ['Paper A'], 'the first ticked study wins; the differing paper of the second is a conflict')
+        self.assertEqual([m['source'] for m in report['merges']], ['source-study', 'target-study'])
+        self.assertEqual(report['merges'][1]['counts']['papers']['conflict'], 1)
+        held = next(d for d in usage['datasets'] if d['id'] == 'HELD')
+        self.assertFalse(module.is_held(held), 'catalogue entries arrive as pre-access entries: the merged study holds no files')
+        licences = json.loads((folder / 'configs/data_licenses.json').read_text())['resources']
+        self.assertTrue(all(set(r['operations'].values()) <= {'unreviewed', 'prohibited'} for r in licences), 'no allowance crosses')
+        self.assertTrue((folder / report['run'] / 'site-request.json').is_file())
+        lines = module.merged_summary_lines(report)
+        self.assertTrue(lines[0].startswith('Created study merged-study from source-study, target-study'))
+        self.assertIn('No file holdings and no AI-use permission cross over.', lines)
+
+    def test_command_line_creates_a_merged_study_from_a_saved_request(self):
+        request_path = self.target.parent / 'datahunter-merged-study-merged-study.json'
+        write(request_path, self.merged_request())
+        with self.studies_here(), patch('builtins.print'):
+            dry = module.main(['--request', str(request_path)])
+            self.assertFalse(dry['applied'])
+            report = module.main(['--request', str(request_path), '--apply', '--no-refresh'])
+        self.assertTrue(report['applied'])
+        self.assertTrue((self.target.parent / 'merged-study/study.json').is_file())
+
     def test_a_screen_whose_id_the_target_uses_covers_its_other_datasets_under_a_derived_id(self):
         selection = json.loads((self.target / 'configs/dataset_selection.json').read_text())
         selection['preaccess_license_policy']['reviews'][0]['id'] = 'provider_terms'  # the target screened OWN under the same screen id

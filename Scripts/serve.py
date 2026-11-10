@@ -7,7 +7,8 @@
 The repository folder is served so that evidence links (notices, receipts, licence
 files) resolve; "/" redirects to the active study's site, and /api/panel answers the
 site's Activity page with the running scripts and every study's milestones; /api/merge-plan?source=ID&target=ID
-answers the Research studies page's Merge control with the dry-run plan of a facts merge (nothing is written). The active study is
+answers the Research studies page's merge control with the dry-run plan of a facts merge, and
+/api/merge-plan?sources=A,B with what each study would bring to a merged study (nothing is written). The active study is
 resolved on every request, so switching studies with `Scripts/study.py use <id>`
 needs no restart. With no study yet, the bootstrap site is served.
 """
@@ -19,12 +20,26 @@ import sys
 CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CODE_ROOT / 'src'))
 from datahunter.workspace import CODE_ROOT, site_dir, workspace_root  # noqa: E402
-from datahunter.panel import panel_model  # noqa: E402
 from datahunter.workspace import valid_id  # noqa: E402
 import json  # noqa: E402
 from urllib.parse import parse_qs, urlsplit  # noqa: E402
 sys.path.insert(0, str(CODE_ROOT / 'Scripts'))
+import importlib  # noqa: E402
 import merge_study_facts  # noqa: E402
+import datahunter.panel as panel  # noqa: E402
+
+_LOADED = {}
+
+
+def fresh(module):
+    """The module, reloaded when its source changed since it was loaded: an edit to the merge or panel code
+    reaches the API without restarting the server (a change to this file itself still needs a restart)."""
+    path = Path(module.__file__)
+    stamp = path.stat().st_mtime_ns
+    if _LOADED.setdefault(module.__name__, stamp) != stamp:
+        module = importlib.reload(module)
+        _LOADED[module.__name__] = stamp
+    return module
 
 
 def site_location():
@@ -50,14 +65,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         parts = urlsplit(self.path)
         if parts.path == '/api/panel':  # the site's Activity page: running scripts, study milestones, what is missing
-            return self.reply_json(panel_model())
+            return self.reply_json(fresh(panel).panel_model())
         if parts.path == '/api/merge-plan':  # the Research studies page's Merge control: the dry run of a facts merge between two registered studies
             query = parse_qs(parts.query)
             source, target = (query.get('source') or [''])[0], (query.get('target') or [''])[0]
+            sources = [x for x in (query.get('sources') or [''])[0].split(',') if x]
             try:
+                if sources:  # “Merge studies into a new study”: each source's inventory and the ids they share
+                    if not all(valid_id(x) for x in sources):
+                        raise ValueError('invalid_study_id')
+                    return self.reply_json(fresh(merge_study_facts).merged_study_preview(sources))
                 if not (valid_id(source) and valid_id(target)):
                     raise ValueError('invalid_study_id')
-                return self.reply_json(merge_study_facts.plan_json(source, target))
+                return self.reply_json(fresh(merge_study_facts).plan_json(source, target))
             except (ValueError, SystemExit) as error:
                 return self.reply_json({'error': str(error)}, 400)
         super().do_GET()
