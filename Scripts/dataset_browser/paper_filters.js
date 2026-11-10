@@ -26,7 +26,7 @@
   target.append(details);
  }
  const explanation=document.createElement('p');explanation.className='small';explanation.textContent='Several ticks in one group match any option (OR); groups combine with AND. Dataset permission counts describe recorded source scopes, not whole-study clearance. A paper’s open-access licence does not license its datasets.';target.prepend(explanation);
- const controls=[...target.querySelectorAll('[data-paper-facet]')],reset=document.createElement('button');reset.type='button';reset.className='plainbutton';reset.textContent='Reset paper filters';reset.addEventListener('click',()=>{controls.forEach(c=>c.checked=false);search.value='';update();});target.append(reset);
+ const controls=[...target.querySelectorAll('[data-paper-facet]')],reset=document.createElement('button');reset.type='button';reset.className='plainbutton';reset.textContent='Reset paper filters';reset.title='Clear every paper filter; the search text stays.';reset.addEventListener('click',()=>{controls.forEach(c=>c.checked=false);search.value='';update();});target.append(reset);
  function describe(p){
   const card=cards.get(p.id);
   if(!infos.has(p.id)){const info=document.createElement('p');info.className='small paper-licence-summary';card.querySelector('h3').after(info);infos.set(p.id,info);}

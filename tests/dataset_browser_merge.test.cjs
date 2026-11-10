@@ -16,4 +16,7 @@ assert.equal(merge.command('x.json'),'.venv/bin/python Scripts/merge_study_facts
 assert.equal(merge.planText(plan),plan.summary.join('\n'));
 assert.equal(merge.planText({error:'invalid_study_id'}),'The plan could not be computed: invalid_study_id');
 assert.equal(merge.planText(null),'');
+assert.equal(merge.fetchProblem(200,'application/json; charset=utf-8'),'');
+assert(merge.fetchProblem(404,'text/html;charset=utf-8').includes('restart it'),'a server without the endpoint is named as stale');
+assert(merge.fetchProblem(500,'text/plain').includes('answered 500'));
 console.log('Passed: merge request building, its guards, file name, command and plan text.');

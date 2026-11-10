@@ -91,7 +91,7 @@
     }
     function chips(s){
       const target=$('[data-active-filters]');target.replaceChildren();
-      function chip(label,remove){const b=document.createElement('button');b.type='button';b.className='filterchip';b.textContent=label+' ×';b.setAttribute('aria-label','Remove filter '+label);b.addEventListener('click',()=>{remove();update();});target.appendChild(b);}
+      function chip(label,remove){const b=document.createElement('button');b.type='button';b.className='filterchip';b.textContent=label+' ×';b.setAttribute('aria-label','Remove filter '+label);b.title='Remove this filter; the others stay.';b.addEventListener('click',()=>{remove();update();});target.appendChild(b);}
       controls.filter(c=>c.value).forEach(c=>chip((c.dataset.filter==='q'?'Search: ':'')+(c.tagName==='SELECT'?c.selectedOptions[0].text:c.value),()=>{c.value='';}));
       checks.filter(c=>c.checked).forEach(c=>chip(payload.facets[c.dataset.facet][1][c.value],()=>{c.checked=false;}));
       const active=target.childElementCount;

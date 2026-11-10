@@ -12,6 +12,11 @@
  }
  function command(filename){return '.venv/bin/python Scripts/merge_study_facts.py --request '+filename+' --apply';}
  function fileName(source,target){return 'datahunter-merge-'+source+'-into-'+target+'.json';}
+ function fetchProblem(status,contentType){
+  if(String(contentType||'').includes('application/json'))return '';
+  if(status===404)return 'this local server does not know /api/merge-plan: it was started before this control existed, so restart it (python Scripts/serve.py)';
+  return 'the local server answered '+status+' with '+(contentType||'no content type')+' instead of JSON';
+ }
  function planText(plan){
   if(!plan)return '';
   if(plan.error)return 'The plan could not be computed: '+plan.error;
@@ -32,9 +37,10 @@
    status.textContent='Computing the plan…';
    try{
     const response=await fetch('/api/merge-plan?source='+encodeURIComponent(select.value)+'&target='+encodeURIComponent(here.id),{cache:'no-store'});
+    const problem=fetchProblem(response.status,response.headers.get('content-type'));if(problem)throw Error(problem);
     lastPlan=await response.json();plan.textContent=planText(lastPlan);plan.hidden=false;
     status.textContent=lastPlan.error?'':'Dry run: nothing was written. Review the plan, tick the box and save the request.';save.disabled=!!lastPlan.error;
-   }catch(error){status.textContent='The plan could not be fetched ('+error.message+'). Is the local server running? The request can still be saved.';save.disabled=false;}
+   }catch(error){status.textContent='The plan could not be fetched: '+error.message+'. Is the local server running? The request can still be saved; the command prints the plan before anything is written.';save.disabled=false;}
   });
   save.addEventListener('click',()=>{
    try{
@@ -46,5 +52,5 @@
   });
  }
  if(typeof document!=='undefined'){if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mount);else mount();}
- return {KIND,buildRequest,command,fileName,planText};
+ return {KIND,buildRequest,command,fileName,planText,fetchProblem};
 });

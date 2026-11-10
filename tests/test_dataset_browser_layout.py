@@ -129,6 +129,18 @@ class ExplorerLayoutTests(unittest.TestCase):
                 for value in (values if isinstance(values,list) else [values]):
                     self.assertIn(f'{key}:{value}',counters,(record['id'],key))
 
+    def test_every_control_explains_itself(self):
+        """Every button, select and menu summary carries a title (or is a ⓘ toggle), and every navigation link says what its page is for."""
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('hints',SOURCE/'hints.py');hints=importlib.util.module_from_spec(spec);spec.loader.exec_module(hints)
+        for page in SITE.rglob('*.html'):
+            html,elements=parse(page)
+            self.assertEqual(hints.missing_hints(html),[],f'{page.name}: controls without a hint')
+            nav=[a for tag,a in elements if tag=='a' and a.get('href','').endswith(('catalogue.html','research-studies.html','activity.html')) and 'aria-current' in a or (tag=='a' and a.get('aria-current')=='page')]
+            self.assertTrue(all(a.get('title') for a in nav),f'{page.name}: navigation links without a title')
+        self.assertIn('data-help="help-selection"',self.html,'the selection bar explains itself')
+        self.assertIn('data-help="help-download-dialog"',self.html,'the download dialog explains itself')
+
     def test_published_assets_match_their_source_and_pages_load_nothing_external(self):
         for published in sorted((SITE/'assets').iterdir()):
             self.assertEqual(published.read_bytes(),(SOURCE/published.name).read_bytes(),published.name)
