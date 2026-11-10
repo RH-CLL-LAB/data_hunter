@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from copy import deepcopy
 import csv
 from datetime import datetime, timezone
 import gzip
@@ -549,7 +550,46 @@ def profile_artifact(root, artifact, options, limits, budget_tables):
     return record
 
 
-def collect(root, options=None, only=None):
+DISK_STATE_REASONS = {'file_missing_on_disk', 'size_differs_from_receipt'}
+
+
+def code_identity():
+    return digest(Path(__file__))
+
+
+def census_records(root):
+    """The latest census record of this study and of the study workspaces beside it (read-only); this study's first."""
+    neighbours = sorted(p for p in root.parent.iterdir() if p.is_dir() and p.resolve() != root and (p / 'study.json').is_file()) if root.parent.is_dir() else []
+    records = []
+    for folder in [root] + neighbours:
+        try:
+            pointer = read(folder / 'data/interim/dataset_structure/latest.json')
+            records.append((folder, read(folder / pointer['structure'])))
+        except (OSError, ValueError, KeyError):
+            continue
+    return records
+
+
+def previous_profiles(root, options, limits):
+    """Artifact profiles of earlier censuses, this study's and its neighbours', keyed by hash and file name.
+
+    A profile is a function of the bytes, the file name, the options, the limits and this code, so one computed by another
+    study for the same bytes is the same profile: a merged or reusing study need not profile copied files again.
+    """
+    profiles = {}
+    for folder, record in census_records(root):
+        if record.get('code_sha256') != code_identity() or record.get('options') != options or record.get('limits') != limits:
+            continue
+        for d in record.get('datasets', []):
+            if not d.get('profiled'):
+                continue
+            for a in d.get('artifacts', []):
+                if a.get('sha256') and not any(x.get('reason') in DISK_STATE_REASONS for x in a.get('skipped', [])):
+                    profiles.setdefault((a['sha256'], a['path'].rsplit('/', 1)[-1]), (a, folder == root))
+    return profiles
+
+
+def collect(root, options=None, only=None, reuse=True):
     root = Path(root).resolve()
     options = {**DEFAULTS, **(options or {})}
     receipt = read(root / 'data/interim/dataset_selection/latest.json')
@@ -560,7 +600,8 @@ def collect(root, options=None, only=None):
     lock_path = root / 'configs/research_resources.lock.json'
     lock_files = len(read(lock_path)['files']) if lock_path.exists() else 0
     licences = read(root / 'configs/data_licenses.json')['resources'] if (root / 'configs/data_licenses.json').exists() else []
-    datasets, cache = [], {}
+    reusable = previous_profiles(root, options, limits) if reuse else {}
+    datasets, cache, reused, reused_elsewhere = [], {}, 0, 0
     for d in catalogue['datasets']:
         artifacts = d.get('obtained_artifacts', [])
         entry = {'id': d['id'], 'name': d['name'], 'category': d.get('category'), 'access_route': d.get('access_route', ''), 'registration_url': d.get('registration_url'),
@@ -572,7 +613,15 @@ def collect(root, options=None, only=None):
             tables_so_far = 0
             for artifact in artifacts:
                 if artifact['path'] not in cache:
-                    cache[artifact['path']] = profile_artifact(root, artifact, options, limits, max(options['max_tables'] - tables_so_far, 0))
+                    previous = reusable.get((artifact.get('sha256'), artifact['path'].rsplit('/', 1)[-1]))
+                    present = (root / artifact['path']).is_file() and (artifact.get('bytes') is None or (root / artifact['path']).stat().st_size == artifact['bytes'])
+                    if previous is not None and present:  # same bytes, name, options and code: the profile cannot differ
+                        record, own = previous
+                        cache[artifact['path']] = {**deepcopy(record), 'path': artifact['path']}
+                        reused += 1
+                        reused_elsewhere += 0 if own else 1
+                    else:
+                        cache[artifact['path']] = profile_artifact(root, artifact, options, limits, max(options['max_tables'] - tables_so_far, 0))
                 record = cache[artifact['path']]
                 tables_so_far += len(record['tables'])
                 entry['artifacts'].append(record)
@@ -594,7 +643,7 @@ def collect(root, options=None, only=None):
                                     | {e['path'] for e in (d['preaccess'].get('evidence') or []) if isinstance(e, dict) and e.get('path')})
         d['terms_sources'] = sorted({u for r in licences if d['id'] in r.get('catalog_ids', []) for u in r.get('sources', [])} | set(d['preaccess'].get('sources') or []))
     return {'root': root, 'receipt': receipt, 'datasets': datasets, 'lock_files': lock_files, 'receipt_files': receipt.get('summary', {}).get('rechecked_unique_artifacts'),
-            'options': options, 'limits': limits}
+            'options': options, 'limits': limits, 'reused_artifacts': reused, 'reused_from_other_studies': reused_elsewhere}
 
 
 def column_row(column):
@@ -708,6 +757,10 @@ def render(data):
            f"at most {options['label_levels']} distinct values. Column statistics use the first {fmt_num(options['max_rows'])} rows of a table; row counts are complete unless marked ≥.", '',
            'This document grants no data or AI-use permission. Column names, labels and statistics are a dictionary-like derivative of the sources: before a model reads them, '
            'the same source-bound preflight applies as to the files themselves (see [Licensing](DATA_LICENSES_AND_AI_USE.md)).', '']
+    if data.get('reused_artifacts'):
+        out += [f"{fmt_num(data['reused_artifacts'])} file profiles were reused from the previous census"
+                + (f" ({fmt_num(data['reused_from_other_studies'])} of them from other studies' censuses of the same bytes)" if data.get('reused_from_other_studies') else '')
+                + ': same bytes, options and profiling code, so the result cannot differ.', '']
     if data['receipt_files'] is not None and data['lock_files'] and data['lock_files'] != data['receipt_files']:
         out += [f"**The catalogue receipt is older than the holdings:** the acquisition lock lists {fmt_num(data['lock_files'])} files but the receipt knows {fmt_num(data['receipt_files'])}. "
                 'Run `Scripts/validate_dataset_workspace.py` and `Scripts/document_dataset_selection.py`, then this report again, so every acquired file is profiled.', '']
@@ -734,9 +787,9 @@ def render(data):
     return '\n'.join(out)
 
 
-def write_document(root=ROOT, options=None, only=None):
+def write_document(root=ROOT, options=None, only=None, reuse=True):
     root = Path(root).resolve()
-    data = collect(root, options, only)
+    data = collect(root, options, only, reuse)
     text = render(data)
     doc = root / 'docs/DATASET_STRUCTURE.md'
     doc.parent.mkdir(parents=True, exist_ok=True)
@@ -746,6 +799,7 @@ def write_document(root=ROOT, options=None, only=None):
     folder.mkdir(parents=True)
     record = {'schema_version': 1, 'generated_at': datetime.now(timezone.utc).isoformat(), 'catalogue_sha256': data['receipt']['selection_sha256'], 'options': data['options'],
               'limits': data['limits'], 'lock_files': data['lock_files'], 'receipt_files': data['receipt_files'], 'model_calls': 0,
+              'code_sha256': code_identity(), 'reused_artifacts': data['reused_artifacts'], 'reused_from_other_studies': data['reused_from_other_studies'],
               'datasets': [{k: v for k, v in d.items() if k != 'preaccess'} for d in data['datasets']]}
     structure = folder / 'structure.json'
     structure.write_text(json.dumps(record, indent=1, ensure_ascii=False, default=str) + '\n')
@@ -763,11 +817,13 @@ def main(argv=None, root=ROOT):
     parser.add_argument('--max-rows', type=int, default=DEFAULTS['max_rows'], help='Rows per table used for the column statistics (default %(default)s)')
     parser.add_argument('--max-tables', type=int, default=DEFAULTS['max_tables'], help='Tables profiled per dataset (default %(default)s)')
     parser.add_argument('--report', action='store_true', help='Also save a dated tracked copy under reports/ and register it with the study')
+    parser.add_argument('--no-reuse', action='store_true', help='Profile every held file again instead of reusing this or a neighbouring study’s census for files whose bytes, options and code are unchanged')
     args = parser.parse_args(argv)
     only = {x.strip() for x in args.datasets.split(',') if x.strip()} if args.datasets else None
-    doc, data = write_document(root, {'max_rows': args.max_rows, 'max_tables': args.max_tables}, only)
+    doc, data = write_document(root, {'max_rows': args.max_rows, 'max_tables': args.max_tables}, only, reuse=not args.no_reuse)
     result = {'document': str(doc), 'datasets': len(data['datasets']), 'held': sum(1 for d in data['datasets'] if d['held_files']),
-              'tables': sum(d['tables'] for d in data['datasets']), 'not_profiled_files': sum(len(d['skipped']) for d in data['datasets'])}
+              'tables': sum(d['tables'] for d in data['datasets']), 'not_profiled_files': sum(len(d['skipped']) for d in data['datasets']), 'reused_artifacts': data['reused_artifacts'],
+              'reused_from_other_studies': data['reused_from_other_studies']}
     if args.report:
         from report_dataset_status import save_report
         result['report'] = str(save_report(root, doc, title='Data structure: tables, columns, types and statistics', stem='dataset-structure', runs_dir='structure_reports'))

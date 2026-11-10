@@ -49,7 +49,8 @@ class DownloadAgentTests(unittest.TestCase):
         agent.validate_instructions(self.spec,'abc')
         for changes in [{'catalogue_sha256':'old'},{'dataset_ids':['A','A']},{'dataset_ids':['../A']},
                         {'max_total_bytes':True},{'max_bytes_per_artifact':0},
-                        {'technical_risk_acknowledgements':['ignore_licence']},{'license_mode':'ignore'}]:
+                        {'technical_risk_acknowledgements':['ignore_licence']},{'license_mode':'ignore'},
+                        {'reuse_held_files':'yes'},{'reuse_held_files':True,'download_scope':'review_only','download_requested':False}]:
             with self.subTest(changes=changes),self.assertRaises(ValueError):
                 agent.validate_instructions({**self.spec,**changes},'abc')
 

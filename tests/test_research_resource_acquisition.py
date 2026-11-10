@@ -109,6 +109,46 @@ class ResearchAcquisitionTests(unittest.TestCase):
                 module.acquire(self.item, {}, self.root, execute=True, journal=lambda *args: events.append(args))
         self.assertEqual(len(commands), 1, 'an attempt that made no progress is not repeated')
 
+    def test_bytes_another_study_holds_are_copied_and_verified_instead_of_downloaded(self):
+        other = self.root / 'other-study'
+        (other / 'data/acquisitions').mkdir(parents=True); (other / 'configs').mkdir()
+        (other / 'data/acquisitions/sample.txt').write_bytes(self.payload)
+        (other / 'configs/research_resources.lock.json').write_text(json.dumps({'files': [{'id': 'example', 'path': 'sample.txt', 'url': self.item['url'], 'bytes': len(self.payload), 'sha256': hashlib.sha256(self.payload).hexdigest()}]}))
+        reuse = module.holdings_of([other])
+        self.assertEqual(list(reuse), [self.item['url']]); self.assertEqual(reuse[self.item['url']]['study'], 'other-study')
+        events = []
+        with patch.object(module.subprocess, 'run', side_effect=AssertionError('no download when the bytes are held elsewhere')):
+            record = module.acquire(self.item, {}, self.root, execute=True, journal=lambda *args: events.append(args), reuse=reuse)
+        self.assertEqual((record['state'], record['copied_from']['study'], record['hash_authority']), ('downloaded_verified', 'other-study', 'provider_MD5_plus_local_SHA256'))
+        self.assertEqual((self.root / 'sample.txt').read_bytes(), self.payload)
+        self.assertEqual(events[0][1].get('reuse_from_study'), 'other-study')
+        (self.root / 'sample.txt').unlink()
+        (other / 'data/acquisitions/sample.txt').write_bytes(b'changed since it was locked')  # the source no longer matches its own lock
+        events.clear()
+        with patch.object(module.subprocess, 'run', side_effect=self.transfer(self.payload, events)):
+            record = module.acquire(self.item, {}, self.root, execute=True, journal=lambda *args: events.append(args), reuse=reuse)
+        self.assertEqual((record['state'], 'copied_from' in record), ('downloaded_verified', False), 'rejected bytes fall back to a download')
+        self.assertIn('reuse_rejected', [ev[0] for ev in events])
+
+    def test_json_label_is_a_caveat_not_a_refusal_once_the_provider_identity_verified(self):
+        jsonc = b'{\n  // a comment\n  "a": 1\n}\n'
+        item = {**self.item, 'format': 'json', 'provider_md5': hashlib.md5(jsonc).hexdigest()}
+        events = []
+        with patch.object(module.subprocess, 'run', side_effect=self.transfer(jsonc, events)):
+            record = module.acquire(item, {}, self.root, execute=True, journal=lambda *args: events.append(args))
+        self.assertEqual(record['state'], 'downloaded_verified'); self.assertIn('Expecting property name', record['format_caveat'])
+        (self.root / 'sample.txt').unlink()
+        lines = b'{"a": 1}\n{"a": 2}\n'
+        item = {**self.item, 'format': 'json', 'provider_md5': hashlib.md5(lines).hexdigest()}
+        with patch.object(module.subprocess, 'run', side_effect=self.transfer(lines, events)):
+            record = module.acquire(item, {}, self.root, execute=True, journal=lambda *args: events.append(args))
+        self.assertEqual((record['inspection'], 'format_caveat' in record), ({'format': 'json-lines', 'records': 2}, False))
+        (self.root / 'sample.txt').unlink()
+        item = {k: v for k, v in self.item.items() if k != 'provider_md5'}; item['format'] = 'json'
+        with patch.object(module.subprocess, 'run', side_effect=self.transfer(jsonc, events)):
+            with self.assertRaisesRegex(ValueError, 'Expecting property name'):
+                module.acquire(item, {}, self.root, execute=True, journal=lambda *args: events.append(args))
+
     def test_bad_transfer_retains_partial_without_promoting(self):
         events = []
         with patch.object(module.subprocess, 'run', side_effect=self.transfer(b'bad', events)):
@@ -285,6 +325,20 @@ class DownloadReviewTests(unittest.TestCase):
         for item in [self.item,{**self.item,'kind':'specification_reference','max_bytes':6*1024**2}]:
             with self.assertRaisesRegex(ValueError,'metadata_preflight_required'):
                 module.require_download_review(item,{})
+
+
+class NearbyWorkspacesTests(unittest.TestCase):
+    def test_workspaces_with_holdings_near_a_study_are_its_siblings_with_a_lock(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            studies = Path(temporary) / 'studies'
+            for name, lock in [('this-study', True), ('other-study', True), ('empty-study', False)]:
+                (studies / name / 'configs').mkdir(parents=True)
+                if lock:
+                    (studies / name / 'configs/research_resources.lock.json').write_text('{"files": []}')
+            (studies / 'notes.txt').write_text('not a workspace')
+            self.assertEqual([p.name for p in module.workspaces_with_holdings_near(studies / 'this-study')], ['other-study'])
+            self.assertEqual([p.name for p in module.workspaces_with_holdings_near(Path(temporary))], ['other-study', 'this-study'], 'a repository-root workspace sees its studies/ folder')
+            self.assertEqual([p.name for p in module.workspaces_with_holdings_near(studies / 'empty-study')], ['other-study', 'this-study'])
 
 
 if __name__ == '__main__':

@@ -398,6 +398,130 @@ class RunTests(WorkspaceFixture):
             report = module.run(self.instructions, root=self.root, only=['ZEN'])
         self.assertEqual(([o['dataset'] for o in report['outcomes']], report['only']), (['ZEN'], ['ZEN']))
 
+    def test_reuse_from_another_study_hands_its_holdings_to_the_acquirer(self):
+        write(self.instructions, self.spec)
+        other = self.root / 'studies' / 'other-study'
+        (other / 'data/acquisitions/datasets/zenodo_1').mkdir(parents=True); (other / 'configs').mkdir()
+        (other / 'data/acquisitions/datasets/zenodo_1/data.zip').write_bytes(b'x' * 1000)
+        write(other / 'configs/research_resources.lock.json', {'files': [{'id': 'zenodo_1_data_zip', 'path': 'datasets/zenodo_1/data.zip', 'url': 'https://zenodo.org/api/records/1/files/data.zip/content', 'bytes': 1000, 'sha256': hashlib.sha256(b'x' * 1000).hexdigest()}]})
+        seen = {}
+
+        def fake_acquire(item, locked, base, execute, journal, license_context, **options):
+            seen[item['id']] = (options.get('reuse') or {}).get(item['url'])
+            path = base / item['path']; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'x' * item['expected_bytes'])
+            record = {'id': item['id'], 'path': item['path'], 'url': item['url'], 'bytes': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                      'hash_authority': 'fixture', 'acquired_at': '2026-01-01T00:00:00+00:00', 'state': 'downloaded_verified', 'inspection': None}
+            return {**record, 'copied_from': {'study': 'other-study'}} if seen[item['id']] else record
+        with patch.object(module, 'fetch', self.web.fetch), patch.object(module.acquisition, 'acquire', fake_acquire):
+            with self.assertRaisesRegex(ValueError, 'reuse_study_is_this_study'):
+                module.run(self.instructions, root=self.root, register_jobs=True, execute_jobs=True, reuse_from=[str(self.root)])
+            report = module.run(self.instructions, root=self.root, register_jobs=True, execute_jobs=True, reuse_from=[str(other)])
+        self.assertEqual(report['execution']['copied_from_other_studies'], 1)
+        self.assertEqual({k: (v or {}).get('study') for k, v in seen.items()}, {'zenodo_1_data_zip': 'other-study', 'zenodo_1_readme_md': None}, 'only the file the other study holds is offered for reuse')
+        rows = [json.loads(l) for l in (self.root / report['run'] / 'operations.jsonl').read_text().splitlines()]
+        self.assertEqual(rows[0]['details']['reuse_from'], ['other-study'])
+
+    def test_saved_reuse_option_finds_the_other_study_workspaces_of_this_checkout(self):
+        write(self.instructions, {**self.spec, 'reuse_held_files': True})
+        other = self.root / 'studies' / 'other-study'
+        (other / 'data/acquisitions/datasets/zenodo_1').mkdir(parents=True); (other / 'configs').mkdir()
+        (other / 'data/acquisitions/datasets/zenodo_1/data.zip').write_bytes(b'x' * 1000)
+        write(other / 'configs/research_resources.lock.json', {'files': [{'id': 'zenodo_1_data_zip', 'path': 'datasets/zenodo_1/data.zip', 'url': 'https://zenodo.org/api/records/1/files/data.zip/content', 'bytes': 1000, 'sha256': hashlib.sha256(b'x' * 1000).hexdigest()}]})
+        (self.root / 'studies' / 'empty-study' / 'configs').mkdir(parents=True)  # a workspace without a lock holds nothing to reuse
+        seen = {}
+
+        def fake_acquire(item, locked, base, execute, journal, license_context, **options):
+            seen[item['id']] = (options.get('reuse') or {}).get(item['url'])
+            path = base / item['path']; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'x' * item['expected_bytes'])
+            record = {'id': item['id'], 'path': item['path'], 'url': item['url'], 'bytes': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                      'hash_authority': 'fixture', 'acquired_at': '2026-01-01T00:00:00+00:00', 'state': 'downloaded_verified', 'inspection': None}
+            return {**record, 'copied_from': {'study': 'other-study'}} if seen[item['id']] else record
+        with patch.object(module, 'fetch', self.web.fetch), patch.object(module.acquisition, 'acquire', fake_acquire):
+            report = module.run(self.instructions, root=self.root, register_jobs=True, execute_jobs=True)
+        self.assertEqual(report['execution']['copied_from_other_studies'], 1)
+        self.assertEqual({k: (v or {}).get('study') for k, v in seen.items()}, {'zenodo_1_data_zip': 'other-study', 'zenodo_1_readme_md': None})
+        rows = [json.loads(l) for l in (self.root / report['run'] / 'operations.jsonl').read_text().splitlines()]
+        self.assertEqual((rows[0]['details']['reuse_from'], rows[0]['details']['reuse_held_files']), (['other-study'], True), 'the saved option names the workspaces it found')
+
+    def reroute(self, route):
+        """The fixture dataset under another access route; the receipt and the instructions follow it."""
+        self.dataset['access_route'] = route
+        selection = self.root / 'data/interim/dataset_selection/20260101T000000000000Z/selection.json'
+        write(selection, {'datasets': [self.dataset]})
+        sha = hashlib.sha256(selection.read_bytes()).hexdigest()
+        write(self.root / 'data/interim/dataset_selection/latest.json', {'selection': str(selection.relative_to(self.root)), 'selection_sha256': sha})
+        self.spec['catalogue_sha256'] = sha
+        write(self.instructions, self.spec)
+        write(self.root / 'configs/dataset_study_usage.json', {'datasets': [{'id': 'ZEN', 'name': 'Zenodo set', 'source_urls': ['https://zenodo.org/records/1'], 'paths': [], 'completeness': 'not_obtained', 'missing_components': [], 'next_action': ''}]})
+
+    def user_folder(self, checksums=True):
+        folder = self.root / 'downloads' / 'zen'
+        (folder / 'sub').mkdir(parents=True)
+        (folder / 'data.csv').write_text('a,b\n1,2\n')
+        (folder / 'sub/README.md').write_text('# readme\n')
+        (folder / 'notes.txt').write_text('notes\n')
+        if checksums:  # the provider's checksum file as the download brought it along; notes.txt is corrupt
+            (folder / 'SHA256SUMS.txt').write_text(''.join(f"{hashlib.sha256((folder / n).read_bytes()).hexdigest()}  {n}\n" for n in ('data.csv', 'sub/README.md')) + '0' * 64 + '  ./notes.txt\n')
+        return folder
+
+    def test_import_from_a_user_folder_verifies_against_its_checksum_file_without_touching_the_provider(self):
+        self.reroute('registration_credentialed_access')  # the user obtained the files through the route; it no longer blocks them
+        folder = self.user_folder()
+        with patch.object(module, 'fetch', self.web.fetch), patch.object(module.acquisition, 'ROOT', self.root):
+            report = module.run(self.instructions, root=self.root, register_jobs=True, execute_jobs=True, import_from={'ZEN': str(folder)})
+        self.assertEqual(self.web.calls, [], 'an imported release never contacts the provider')
+        outcome = report['outcomes'][0]
+        self.assertEqual((outcome['outcome'], outcome['release_files'], outcome['new_jobs'], outcome['imported_from'], outcome['manifest']),
+                         ('ready', 3, 3, str(folder), 'SHA256SUMS.txt supplied with the files'))
+        self.assertEqual(report['execution'], {'acquired': 2, 'failed': 1, 'quarantined': 0, 'lock_files': 2, 'copied_from_other_studies': 0, 'imported_from_folders': 2})
+        lock = {f['path']: f for f in json.loads((self.root / 'configs/research_resources.lock.json').read_text())['files']}
+        self.assertEqual(sorted(lock), ['datasets/zen/data.csv', 'datasets/zen/sub/README.md'])
+        self.assertEqual((lock['datasets/zen/data.csv']['hash_authority'], lock['datasets/zen/data.csv']['copied_from']['folder'], lock['datasets/zen/data.csv']['url']),
+                         ('provider_SHA256_from_checksum_file_supplied_with_the_import', str(folder), 'https://zenodo.org/records/1/data.csv'))
+        self.assertEqual((self.root / 'data/acquisitions/datasets/zen/data.csv').read_text(), 'a,b\n1,2\n')
+        results = {r['id']: r for r in json.loads((self.root / 'data/acquisitions/acquisition-report.json').read_text())['results']}
+        self.assertIn('provider_sha256_mismatch', next(r for r in results.values() if r['state'] == 'failed')['problem'], 'a corrupt download is refused, not locked')
+        self.assertFalse((self.root / 'data/acquisitions/datasets/zen/notes.txt').exists())
+        self.assertTrue(outcome['evidence'][0]['path'].endswith('import_zen_SHA256SUMS.txt'), 'the checksum file is retained as evidence')
+        rows = [json.loads(l) for l in (self.root / report['run'] / 'operations.jsonl').read_text().splitlines()]
+        self.assertEqual(rows[0]['details']['import_from'], {'ZEN': str(folder)})
+        self.assertTrue(any(r['kind'] == 'transfer_started' and r['details'].get('imported_from_folder') == str(folder) for r in rows))
+        log = [json.loads(l) for l in (self.root / 'actions.jsonl').read_text().splitlines()]
+        self.assertIn(f'2 imported from ZEN ({folder})', log[-1]['detail'])
+        entry = json.loads((self.root / 'configs/dataset_study_usage.json').read_text())['datasets'][0]
+        self.assertEqual(entry['paths'], ['data/acquisitions/datasets/zen/'])
+
+    def test_import_without_a_checksum_file_needs_the_missing_checksum_acknowledgement(self):
+        self.reroute('registration_data_use_agreement')
+        folder = self.user_folder(checksums=False)
+        with patch.object(module, 'fetch', self.web.fetch), patch.object(module.acquisition, 'ROOT', self.root):
+            report = module.run(self.instructions, root=self.root, register_jobs=True, import_from={'ZEN': str(folder)})
+            self.assertEqual((report['outcomes'][0]['outcome'], report['outcomes'][0]['unacknowledged_files']), ('needs_technical_risk_acknowledgement', 3))
+            self.assertEqual(report['outcomes'][0]['manifest'], 'none: local SHA-256 identities only (no checksum file supplied)')
+            write(self.instructions, {**self.spec, 'technical_risk_acknowledgements': ['missing_provider_checksum'], 'direct_holdings_for_acknowledged_risks': True})
+            report = module.run(self.instructions, root=self.root, register_jobs=True, execute_jobs=True, import_from={'ZEN': str(folder)})
+        self.assertEqual(self.web.calls, [])
+        self.assertEqual(report['execution'], {'acquired': 3, 'failed': 0, 'quarantined': 0, 'lock_files': 3, 'copied_from_other_studies': 0, 'imported_from_folders': 3})
+        lock = {f['path']: f for f in json.loads((self.root / 'configs/research_resources.lock.json').read_text())['files']}
+        self.assertEqual({f['hash_authority'] for f in lock.values()}, {'local_first_acquisition_SHA256_not_provider_checksum'})
+        self.assertEqual({f['identity'] for f in lock.values()}, {'local_sha256_only'})
+
+    def test_import_is_refused_for_an_incomplete_folder_or_one_inside_the_workspace(self):
+        self.reroute('registration_credentialed_access')
+        folder = self.user_folder()
+        (folder / 'SHA256SUMS.txt').write_text((folder / 'SHA256SUMS.txt').read_text() + '1' * 64 + '  missing.csv\n')
+        with patch.object(module, 'fetch', self.web.fetch):
+            report = module.run(self.instructions, root=self.root, register_jobs=True, import_from={'ZEN': str(folder)})
+            self.assertEqual((report['outcomes'][0]['outcome'], report['outcomes'][0]['missing_files']), ('import_folder_incomplete_1_listed_files_missing', ['missing.csv']))
+            self.assertEqual(json.loads((self.root / 'configs/research_resources.json').read_text())['resources'], [], 'nothing is registered from an incomplete release')
+            inside = self.root / 'data/acquisitions/stray'
+            inside.mkdir(parents=True)
+            with self.assertRaisesRegex(ValueError, 'import_folder_inside_the_workspace_data'):
+                module.run(self.instructions, root=self.root, import_from={'ZEN': str(inside)})
+            with self.assertRaisesRegex(ValueError, 'import_dataset_not_in_instructions'):
+                module.run(self.instructions, root=self.root, import_from={'OTHER': str(folder)})
+        self.assertEqual(self.web.calls, [])
+
     def test_direct_holdings_option_locks_acknowledged_risk_files_with_recorded_caveats(self):
         record = {'metadata': {'access_right': 'open'}, 'files': [{'key': 'data.zip', 'size': 1000, 'checksum': 'md5:' + 'c' * 32}, {'key': 'notes.txt', 'size': 20}]}
         self.web = FakeWeb({'https://zenodo.org/api/records/1': (200, json.dumps(record).encode())})

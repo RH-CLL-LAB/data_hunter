@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Consolidate selection facts without changing dataset bytes or readiness gates."""
+"""Consolidate selection facts without changing dataset bytes or readiness gates.
+
+Writes the selection receipt and catalogue documents, the quarantine listing, the status document, the data-structure
+census of the held files (docs/DATASET_STRUCTURE.md; unchanged files reuse their last profile) and rebuilds the site.
+"""
+import argparse
 from collections import Counter
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -394,7 +399,10 @@ def update_action_queues(records, validation, policy=None):
         'Update curated selection/relevance and grouped priorities in `configs/dataset_selection.json`, provider/study facts in `configs/dataset_study_usage.json`, and source/permission evidence through their existing gated tools. Re-run validation and `Scripts/document_dataset_selection.py`; do not create another parallel catalogue.',end,'']
     path.write_text(text.rstrip()+'\n\n'+'\n'.join(lines))
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--skip-structure', action='store_true', help='Leave docs/DATASET_STRUCTURE.md as it is instead of refreshing the data-structure census from the new receipt')
+    args = parser.parse_args(argv)
     policy, usage = read(POLICY), read(USAGE)
     receipt_path = ROOT / 'data/interim/dataset_validation/latest.json'
     receipt = read(receipt_path)
@@ -508,6 +516,11 @@ def main():
     inventory(ROOT)  # current quarantine listing for the status document and the Quarantine page
     from report_dataset_status import write_document
     write_document(ROOT)  # docs/DATASET_STATUS.md: one state per dataset and the action it needs
+    if not args.skip_structure:
+        from report_dataset_structure import write_document as write_structure
+        _, structure = write_structure(ROOT)  # docs/DATASET_STRUCTURE.md: what is inside the held files; unchanged files reuse their last profile
+        summary['data_structure'] = {'held_datasets': sum(1 for d in structure['datasets'] if d['held_files']), 'tables': sum(d['tables'] for d in structure['datasets']),
+                                     'columns': sum(d['columns'] for d in structure['datasets']), 'reused_file_profiles': structure['reused_artifacts']}
     from build_dataset_browser import build
     build()
     print(json.dumps(summary, indent=2))

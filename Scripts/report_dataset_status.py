@@ -43,16 +43,19 @@ STATES = ('AUTOMATIC', 'PARTIAL', 'ACTION NEEDED', 'NO ROUTE')
 CAUSES = OrderedDict([('tick', 'Needs one tick from you: a technical exception'), ('licence', 'Needs your licence decision'),
                       ('agreement', 'Needs an access agreement or registration only you can complete'), ('terms', 'Needs per-source terms before any transfer'),
                       ('route', 'No route for this project'), ('open', 'Open release not yet acquired')])
+IMPORT = 'download the files yourself (keep the provider’s SHA256SUMS or MD5SUMS file with them), record the agreement in the dataset’s licence review and import the folder with `Scripts/resolve_full_release.py --import-from ID=FOLDER`'
 ROUTE_ACTIONS = {
-    'registration_credentialed_access': ('agreement', 'Complete the provider credentialing (identity, required training, signed data use agreement){at}; then the agent pins the release manifest and size.'),
-    'registration_credentialed_contributor_review': ('agreement', 'Complete the provider credentialing{at} and submit the study description for the contributors’ review; transfer only after their approval.'),
-    'registration_data_use_agreement': ('agreement', 'Create the provider account, read and accept the data use agreement in your browser{at} and keep its text; then the agent pins the release.'),
-    'registration_institutional_end_user_license': ('agreement', 'Apply{at} with an institutional address and the required certificates, accept the End User License and keep it; files follow after approval.'),
-    'registration_click_through': ('agreement', 'Register{at}, accept the click-through licence and keep it; then the agent plans the download.'),
+    'registration_credentialed_access': ('agreement', 'Complete the provider credentialing (identity, required training, signed data use agreement){at}; then ' + IMPORT + '.'),
+    'registration_credentialed_contributor_review': ('agreement', 'Complete the provider credentialing{at} and submit the study description for the contributors’ review; after their approval ' + IMPORT + '.'),
+    'registration_data_use_agreement': ('agreement', 'Create the provider account, read and accept the data use agreement in your browser{at} and keep its text; then ' + IMPORT + '.'),
+    'registration_institutional_end_user_license': ('agreement', 'Apply{at} with an institutional address and the required certificates, accept the End User License and keep it; when the files arrive, ' + IMPORT + '.'),
+    'registration_click_through': ('agreement', 'Register{at}, accept the click-through licence and keep it; then ' + IMPORT + '.'),
     'public_pending_file_level_review': ('licence', 'Decide the data terms in the dataset’s licence review (the retained notices are linked there); a software licence alone is not a data grant.'),
     'public_mixed_sources': ('terms', 'Review each component source’s terms; the agent fetches the permitted components and lists the rest.'),
     'no_public_access_route': ('route', 'No public access route exists for this project; the entry is context only.'),
 }
+OPEN_GAPS = OrderedDict([('blocked_dataset_size_limit', 'Release above the per-dataset ceiling'), ('unsupported_provider_manual_route', 'Provider without an automated route'),
+                         ('partial', 'Registered files not held'), ('ready_partial', 'A source without an automated route (the other files are held)')])
 RISK_ACTIONS = {'missing_provider_checksum': 'tick “missing provider checksum” in the Download dialog and re-send the instructions (the first transfer is quarantined once, then reviewed and released)',
                 'unknown_advertised_size': 'tick “unknown advertised size” in the Download dialog and re-send the instructions'}
 
@@ -78,6 +81,18 @@ def latest_run_statuses(root):
     return seen
 
 
+def latest_resolutions(root):
+    """Per dataset: its outcome in the most recent full-release resolution that reached a verdict (a transient provider error never replaces one)."""
+    folder = root / 'runs/full_release'
+    seen = {}
+    for path in (sorted(folder.glob('*/report.json')) if folder.is_dir() else []):
+        for outcome in read(path).get('outcomes', []):
+            if outcome['dataset'] in seen and outcome['outcome'].startswith(('github_api_rate_limited', 'provider_error')):
+                continue
+            seen[outcome['dataset']] = {**outcome, 'run': path.parent.name}
+    return seen
+
+
 def collect(root):
     root = Path(root).resolve()
     receipt = read(root / 'data/interim/dataset_selection/latest.json')
@@ -91,7 +106,7 @@ def collect(root):
     human = [r for r in read(human_path).get('reviews', []) if r.get('applied')] if human_path.exists() else []
     studies = read(root / 'configs/research_studies.json')
     return {'root': root, 'receipt': receipt, 'datasets': catalogue['datasets'], 'usage': usage, 'reviews': reviews, 'locked': locked, 'licences': licences, 'human': human,
-            'studies': studies, 'runs': latest_run_statuses(root), 'quarantine': review_quarantine.inventory(root, write=False)}
+            'studies': studies, 'runs': latest_run_statuses(root), 'resolutions': latest_resolutions(root), 'quarantine': review_quarantine.inventory(root, write=False)}
 
 
 def held_counts(d, data):
@@ -156,6 +171,25 @@ def classify(d, data):
             'bytes': d.get('associated_download_bytes'), 'release_name': (review or {}).get('full_release', {}).get('manifest')}
 
 
+def open_route_gaps(rows, data):
+    """Open-route datasets (no registration, agreement or login) whose release is not completely held, by what stands in the way."""
+    gaps = OrderedDict((key, []) for key in OPEN_GAPS)
+    for r in rows:
+        outcome = data.get('resolutions', {}).get(r['id'])
+        if not r['route'].startswith('public') or r['state'] == 'AUTOMATIC' or not outcome:
+            continue
+        urls = ', '.join(outcome.get('unsupported_urls') or [])
+        if outcome['outcome'] == 'blocked_dataset_size_limit':
+            gaps['blocked_dataset_size_limit'].append((r, f"{outcome.get('release') or r['id']}: {outcome.get('release_files') or 0:,} files above the 20 GB ceiling; only a reviewed file-level selection can go through the download agent"))
+        elif outcome['outcome'] == 'unsupported_provider_manual_route':
+            gaps['unsupported_provider_manual_route'].append((r, (urls or r['next_action'] or 'see the dataset page') + '; needs a provider adapter or a manual download registered through the usual review'))
+        elif r['release'] and r['held'] < r['release']:
+            gaps['partial'].append((r, f"{r['release'] - r['held']:,} of {r['release']:,} registered files not held (see the acquisition report and the dataset page)" + (f"; sources without a route: {urls}" if urls else '')))
+        elif outcome['outcome'] == 'ready_partial' and urls:
+            gaps['ready_partial'].append((r, urls))
+    return gaps
+
+
 def fmt_held(row):
     if row['state'] == 'NO ROUTE':
         return '0'
@@ -181,6 +215,14 @@ def render(data):
     for r in sorted(rows, key=lambda r: (STATES.index(r['state']), r['id'])):
         out.append(f"| {r['id']} | **{r['state']}** | {fmt_held(r)} | {'; '.join(r['actions']).replace('|', '\\|')} | {r['route'].replace('_', ' ')} |")
     out += ['', 'Counts: ' + ', '.join(f"{counts.get(s, 0)} {s.lower()}" for s in STATES) + '.', '']
+    gaps = open_route_gaps(rows, data)
+    if any(gaps.values()):
+        out += ['## Open-access data not held', '',
+                'Datasets on an open route (no registration, agreement or login) whose release the resolver could not complete, and why. No access step of yours closes these gaps: '
+                'they need a provider adapter, a manual download registered through the usual review, or a decision on the listed file. Every other dataset that is not AUTOMATIC sits behind an access step, listed further down.', '']
+        for key, title in OPEN_GAPS.items():
+            if gaps[key]:
+                out += [f'### {title}', '', '| Dataset | Held | Detail |', '|---|---|---|'] + [f"| {r['id']} | {fmt_held(r)} | {detail.replace('|', '\\|')} |" for r, detail in gaps[key]] + ['']
     automatic = [r for r in rows if r['state'] == 'AUTOMATIC']
     if automatic:
         out += ['## Obtained automatically', '', '| Dataset | Files | Bytes held | Where | Licence basis |', '|---|---|---|---|---|']

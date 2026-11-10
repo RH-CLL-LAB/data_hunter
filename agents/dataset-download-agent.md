@@ -92,6 +92,12 @@ quarantine, recording the uncertainty on each (`identity: local_sha256_only`, `t
 the dataset's `data_caveats` (what is uncertain, where to look, what to check). It never relaxes the
 identity checks that do exist, the byte caps, the access routes or the AI-use preflight.
 
+With `reuse_held_files: true` (the dialog's “Reuse files another study already holds”), a file whose source URL
+another study workspace of this checkout has downloaded and verified is copied from there instead of
+downloaded again, re-verified against the same provider identity and passed through this study's own
+access, size and licence gates; the record carries `copied_from`. Nothing else crosses: no licence record,
+approval or AI-use permission, so the copy stays blocked until this study's licence review decides.
+
 ## Quarantine review
 
 Staged deliveries are listed with `Scripts/review_quarantine.py list` and shown on the study's

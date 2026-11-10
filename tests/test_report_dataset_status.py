@@ -101,6 +101,26 @@ class StatusReportTests(unittest.TestCase):
         self.assertIn('nothing here grants data or AI-use permission', text)
         self.assertIn('DATA_HUNTER_STUDY_ID=demo-study', text)
 
+    def test_open_access_gaps_come_from_the_latest_full_release_resolution(self):
+        def outcome(dataset, result, **extra):
+            return {'dataset': dataset, 'outcome': result, 'release': None, 'release_files': None, 'unsupported_urls': [], **extra}
+        write(self.root / 'runs/full_release/r1/report.json', {'outcomes': [outcome('TICK', 'ready'), outcome('TERMS', 'ready')]})
+        write(self.root / 'runs/full_release/r2/report.json', {'outcomes': [
+            outcome('TICK', 'blocked_dataset_size_limit', release='PhysioNet big 1.0.0', release_files=6394),
+            outcome('TERMS', 'unsupported_provider_manual_route', unsupported_urls=['https://provider.example/files.htm']),
+            outcome('PART', 'ready_partial', release_files=4, unsupported_urls=['https://kaggle.example/two-sets']),
+            outcome('CRED', 'blocked_access_registration_credentialed_access'), outcome('OPEN_DONE', 'already_complete')]})
+        write(self.root / 'runs/full_release/r3/report.json', {'outcomes': [outcome('TICK', 'github_api_rate_limited_retry_after_later')]})
+        doc, rows, counts = module.write_document(self.root)
+        text = doc.read_text()
+        self.assertIn('## Open-access data not held', text)
+        self.assertIn('| TICK | 0 | PhysioNet big 1.0.0: 6,394 files above the 20 GB ceiling', text, 'a transient error never replaces the size verdict')
+        self.assertIn('| TERMS | 0 | https://provider.example/files.htm; needs a provider adapter', text)
+        self.assertIn('| PART | 2 / 4 files | 2 of 4 registered files not held', text)
+        self.assertIn('sources without a route: https://kaggle.example/two-sets', text)
+        self.assertNotIn('| CRED | 0 |', text.split('## Open-access data not held')[1].split('## Obtained automatically')[0], 'registration routes are not open-access gaps')
+        self.assertNotIn('| OPEN_DONE |', text.split('## Open-access data not held')[1].split('## Obtained automatically')[0])
+
     def test_dated_report_is_tracked_and_registered_with_the_study(self):
         doc, rows, counts = module.write_document(self.root)
         sys.path.insert(0, str(CODE_ROOT / 'Scripts'))

@@ -47,7 +47,7 @@ def read_instructions(path):
         rows=list(reader)
     common=['schema_version','kind','catalogue_sha256','license_mode','max_bytes_per_artifact','max_total_bytes','technical_risk_acknowledgements']
     if not rows or any(key not in reader.fieldnames for key in ['id',*common]):raise ValueError('not_agent_instructions_csv')
-    common.extend(key for key in ['download_scope','download_requested','max_bytes_per_dataset','research_study','acquire_unresolved_rights','direct_holdings_for_acknowledged_risks'] if key in reader.fieldnames)
+    common.extend(key for key in ['download_scope','download_requested','max_bytes_per_dataset','research_study','acquire_unresolved_rights','direct_holdings_for_acknowledged_risks','reuse_held_files'] if key in reader.fieldnames)
     if any(None in row or any(row[k]!=rows[0][k] for k in common) for row in rows):raise ValueError('inconsistent_csv_agent_settings')
     first=rows[0]
     scope=first.get('download_scope','minimal')
@@ -59,7 +59,8 @@ def read_instructions(path):
             'agent_definition':'agents/dataset-download-agent.md' if scope=='minimal' else 'agents/dataset-intake-agent.md',
             'selected_context':rows,'source_format':'csv',**({'research_study':normalize_study(json.loads(first['research_study']))} if first.get('research_study') else {}),
             **({'acquire_unresolved_rights':first['acquire_unresolved_rights']=='true'} if first.get('acquire_unresolved_rights') in {'true','false'} else {}),
-            **({'direct_holdings_for_acknowledged_risks':first['direct_holdings_for_acknowledged_risks']=='true'} if first.get('direct_holdings_for_acknowledged_risks') in {'true','false'} else {})}
+            **({'direct_holdings_for_acknowledged_risks':first['direct_holdings_for_acknowledged_risks']=='true'} if first.get('direct_holdings_for_acknowledged_risks') in {'true','false'} else {}),
+            **({'reuse_held_files':first['reuse_held_files']=='true'} if first.get('reuse_held_files') in {'true','false'} else {})}
 
 
 def validate_instructions(spec,catalogue_sha):
@@ -73,6 +74,7 @@ def validate_instructions(spec,catalogue_sha):
     if scope not in {'review_only','minimal','full'} or ('download_requested' in spec and spec['download_requested'] is not (scope!='review_only')):raise ValueError('invalid_or_inconsistent_download_scope')
     if 'acquire_unresolved_rights' in spec and (type(spec['acquire_unresolved_rights']) is not bool or (spec['acquire_unresolved_rights'] and scope=='review_only')):raise ValueError('invalid_acquire_unresolved_rights_option')
     if 'direct_holdings_for_acknowledged_risks' in spec and (type(spec['direct_holdings_for_acknowledged_risks']) is not bool or (spec['direct_holdings_for_acknowledged_risks'] and scope!='full')):raise ValueError('invalid_direct_holdings_option')
+    if 'reuse_held_files' in spec and (type(spec['reuse_held_files']) is not bool or (spec['reuse_held_files'] and scope=='review_only')):raise ValueError('invalid_reuse_held_files_option')
     acknowledgements=spec.get('technical_risk_acknowledgements',[])
     if not isinstance(acknowledgements,list) or any(r not in RISKS for r in acknowledgements):raise ValueError('invalid_technical_risk_acknowledgement')
     for key in ['max_bytes_per_artifact','max_total_bytes']:
@@ -106,7 +108,7 @@ def license_preflight(job,locked,reviews,registry):
     return acquisition.transfer_license_preflight(job,locked,reviews,registry)
 
 
-def process_job(job,locked,stage,original,acknowledgements,execute,caps,journal,used,license_report):
+def process_job(job,locked,stage,original,acknowledgements,execute,caps,journal,used,license_report,reuse=None):
     if job.get('acquisition')!='direct':return {'id':job['id'],'status':'blocked_access','problem':job.get('reason','Provider access required')}
     if not job.get('url','').startswith('https://'):return {'id':job['id'],'status':'blocked_https_required'}
     old=locked.get(job['id'])
@@ -133,7 +135,7 @@ def process_job(job,locked,stage,original,acknowledgements,execute,caps,journal,
     if not execute:return {**result,'status':'eligible_dry_run','transfer_cap':budget}
     journal('transfer_authorized',{'resource_id':job['id'],'url':job['url'],'risks':risks,'acknowledged':sorted(acknowledgements),'hard_cap':budget})
     try:
-        record=acquisition.acquire(job,locked,base=stage,execute=True,journal=journal,allow_unresolved_rights=unresolved,license_context={'mode':license_report.get('mode','lenient'),'study_id':license_report.get('study_id') or license_report.get('default_study') or 'baseline'})
+        record=acquisition.acquire(job,locked,base=stage,execute=True,journal=journal,allow_unresolved_rights=unresolved,reuse=reuse,license_context={'mode':license_report.get('mode','lenient'),'study_id':license_report.get('study_id') or license_report.get('default_study') or 'baseline'})
         return {**result,'status':'downloaded_quarantined' if risks else 'downloaded_rights_unresolved' if unresolved else 'downloaded_staged_verified','record':record,
                 'promotion':'Not added to the original acquisition lock or cleared for workflow AI; inspect and register the approved delivered version first.'}
     except Exception as err:return {**result,'status':'transfer_failed','problem':str(err),'partial_files_retained':True}
@@ -171,9 +173,10 @@ def run(instructions_path,execute=False,root=ROOT):
         target=run_dir/'evidence'/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,target)
     def journal(kind,details):
         with (run_dir/'operations.jsonl').open('a') as stream:stream.write(json.dumps({'at':now(),'kind':kind,'details':details},ensure_ascii=False)+'\n')
-    journal('run_started',{'execute':execute,'dataset_ids':spec['dataset_ids'],'license_mode':licenses.mode,'evidence':evidence,'technical_acknowledgements':sorted(acknowledgements)})
+    journal('run_started',{'execute':execute,'dataset_ids':spec['dataset_ids'],'license_mode':licenses.mode,'evidence':evidence,'technical_acknowledgements':sorted(acknowledgements),'reuse_held_files':spec.get('reuse_held_files') is True})
     for r in sorted(acknowledgements):print('WARNING: '+RISKS[r],flush=True)
     results=[];used=[0];completed={}
+    reuse=acquisition.holdings_of(acquisition.workspaces_with_holdings_near(root)) if spec.get('reuse_held_files') is True else None  # the saved option: copy what another study of this checkout holds, under this study's own gates
     for id in spec['dataset_ids']:
         d=datasets[id];jobs=bound_jobs(d,manifest,locked,reviews,original,root)
         dataset_license=licenses.check([f['sha256'] for f in d['obtained_artifacts']],['local_inference','local_embedding'])
@@ -195,7 +198,7 @@ def run(instructions_path,execute=False,root=ROOT):
                 if job['id'] not in completed:
                     try:
                         permission=license_preflight(job,locked,reviews,licenses)
-                        completed[job['id']]={**process_job(job,locked,stage,original,acknowledgements,execute,spec,journal,used,permission),'license_preflight':permission}
+                        completed[job['id']]={**process_job(job,locked,stage,original,acknowledgements,execute,spec,journal,used,permission,reuse),'license_preflight':permission}
                     except Exception as err:completed[job['id']]={'id':job['id'],'status':'failed','problem':str(err)}
                 outcomes.append(completed[job['id']])
             result={'dataset':id,'status':'artifact_outcomes_recorded','artifacts':outcomes,'remaining_work':d['missing_components']}

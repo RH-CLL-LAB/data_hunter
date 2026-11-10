@@ -17,6 +17,7 @@ import io
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -179,7 +180,20 @@ def validate(path, item):
             if not stream.read(1024).lstrip().startswith(b'%PDF-'):
                 raise ValueError('not_a_pdf')
     if item['format'] == 'json':
-        json.loads(path.read_text())
+        identity_verified = any(item.get(k) for k in ('provider_sha256', 'provider_md5', 'git_blob_sha1'))  # checked above
+        try:
+            json.loads(path.read_text(encoding='utf-8'))
+        except (ValueError, UnicodeDecodeError) as error:
+            try:
+                records = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
+            except (ValueError, UnicodeDecodeError):
+                records = None
+            if records:
+                return {'format': 'json-lines', 'records': len(records)}  # one JSON value per line is a common provider format behind a .json name
+            if not identity_verified:
+                raise
+            # The provider's identity proved these are its bytes; the format label came from the file name (JSON with comments, non-UTF-8 text …).
+            return {'format_check': {'declared': 'json', 'problem': str(error)[:200], 'note': 'provider identity verified; format label inferred from the file name'}}
     if item['format'] == 'zip':
         return inspect_zip(path, item.get('csv_profile'), inspect_csv=item.get('inspect_csv', True),
                            max_uncompressed=item.get('max_uncompressed_bytes', 2 * 1024**3))
@@ -274,7 +288,35 @@ def inspect_zip(path, profile=None, *, inspect_csv=True, max_uncompressed=2 * 10
             'uncompressed_bytes': sum(x['bytes'] for x in members)}
 
 
-def acquire(item, locked, base=BASE, *, execute=False, journal=None, license_context=None, allow_unresolved_rights=False):
+def workspaces_with_holdings_near(root):
+    """Other study workspaces of this checkout that hold verified files: the siblings of a workspace under studies/ and the
+    studies/ folder of a repository-root workspace. These are the candidates of the saved `reuse_held_files` option."""
+    root = Path(root).resolve()
+    parents = [root / 'studies'] + ([root.parent] if root.parent.name == 'studies' else [])
+    candidates = [p for parent in parents if parent.is_dir() for p in sorted(parent.iterdir())]
+    return [p for p in candidates if p.is_dir() and p.resolve() != root and (p / 'configs/research_resources.lock.json').is_file()]
+
+
+def holdings_of(workspaces):
+    """URL -> verified holding of other study workspaces (path, bytes, sha256, study), from their locks.
+
+    Lets a study reuse bytes another study already holds instead of downloading them again; the identity checks and
+    this study's own permission gates still apply to every reused file, and nothing about the other study's rights carries over.
+    """
+    sources = {}
+    for workspace in workspaces:
+        workspace = Path(workspace)
+        lock_path = workspace / 'configs/research_resources.lock.json'
+        if not lock_path.is_file():
+            continue
+        for f in json.loads(lock_path.read_text())['files']:
+            path = workspace / 'data/acquisitions' / f['path']
+            if f.get('url') and path.is_file():
+                sources.setdefault(f['url'], {'path': path, 'bytes': f['bytes'], 'sha256': f['sha256'], 'study': workspace.name})
+    return sources
+
+
+def acquire(item, locked, base=BASE, *, execute=False, journal=None, license_context=None, allow_unresolved_rights=False, reuse=None):
     if item.get('acquisition') != 'direct':
         return {'id': item['id'], 'state': item['acquisition'], 'reason': item['reason']}
     path = contained(base, item['path'])
@@ -314,19 +356,31 @@ def acquire(item, locked, base=BASE, *, execute=False, journal=None, license_con
         raise ValueError('partial_transfer_retained_requires_review')
     if not item['url'].startswith('https://'):
         raise ValueError('https_required')
+    source = (reuse or {}).get(item['url'])
     if journal:
-        journal('transfer_started', {'id': item['id'], 'url': item['url'], 'path': item['path'],
-                                     'download_preflight': review})
+        journal('transfer_started', {'id': item['id'], 'url': item['url'], 'path': item['path'], 'download_preflight': review,
+                                     **({'reuse_from_study': source['study']} if source and source.get('study') else {}),
+                                     **({'imported_from_folder': source['folder']} if source and source.get('folder') else {})})
+    copied = None
+    if source and Path(source['path']).is_file():  # bytes another study verified, or a folder the user downloaded: copied, then checked exactly like a download; permission stays this study's own
+        shutil.copyfile(source['path'], partial)
+        if digest(partial) == source['sha256'] and partial.stat().st_size == source['bytes']:
+            copied = {**{k: source[k] for k in ('study', 'folder') if source.get(k)}, 'path': str(source['path']), 'sha256': source['sha256']}
+        else:
+            partial.unlink()
+            if journal:
+                journal('reuse_rejected', {'id': item['id'], 'source': source.get('study') or source.get('folder'), 'reason': 'bytes_differ_from_the_source; downloading instead'})
     command = ['curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https', '--proto-redir', '=https',
                '--connect-timeout', '20', '--speed-time', '120', '--speed-limit', '1024',  # a connection stalled below 1 KB/s for two minutes fails; a slow provider may take as long as a full release needs
                '--max-filesize', str(item.get('max_bytes', 64 * 1024**2)), '--output', str(partial), item['url']]
-    for attempt in range(5):  # a dropped connection resumes from the partial this transfer retained (curl fixes the offset when it starts, so a resume is a new invocation); an attempt without progress ends the transfer
+    result = None
+    for attempt in range(5 if copied is None else 0):  # a dropped connection resumes from the partial this transfer retained (curl fixes the offset when it starts, so a resume is a new invocation); an attempt without progress ends the transfer
         before = partial.stat().st_size if partial.exists() else 0
         result = subprocess.run(command + (['--continue-at', '-'] if before else []), capture_output=True, text=True)
         if result.returncode == 0 or not partial.exists() or partial.stat().st_size <= before:
             break
         time.sleep(10)
-    if result.returncode:
+    if result is not None and result.returncode:
         raise RuntimeError(f'curl_exit_{result.returncode}; partial retained; {result.stderr[-160:]}')
     inspection = validate(partial, item)
     sha = digest(partial)
@@ -336,9 +390,12 @@ def acquire(item, locked, base=BASE, *, execute=False, journal=None, license_con
                  'GitHub_MCP_git_blob' if item.get('git_blob_sha1') else
                  'provider_MD5_plus_local_SHA256' if item.get('provider_md5') else
                  'local_first_acquisition_SHA256_not_provider_checksum')
+    if copied and copied.get('folder') and not authority.startswith('local_'):
+        authority += '_from_checksum_file_supplied_with_the_import'  # the provider's hashes came with the user's download, not from the provider directly
     record = {'id': item['id'], 'path': item['path'], 'url': item['url'],
               'bytes': partial.stat().st_size, 'sha256': sha, 'hash_authority': authority,
-              'acquired_at': old['acquired_at'] if old else now()}
+              'acquired_at': old['acquired_at'] if old else now(), **({'copied_from': copied} if copied else {}),
+              **({'format_caveat': inspection['format_check']['problem']} if isinstance(inspection, dict) and inspection.get('format_check') else {})}
     partial.replace(path)
     return {**record, 'state': 'downloaded_verified', 'inspection': inspection}
 

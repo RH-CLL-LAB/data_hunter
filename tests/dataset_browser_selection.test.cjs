@@ -43,6 +43,13 @@ assert.equal(instructions.direct_holdings_for_acknowledged_risks,false,'quaranti
 const direct=model.agentInstructions([a],{catalogue_sha256:'hash'},{downloadScope:'full',directHoldings:true,acknowledgements:['missing_provider_checksum']});
 assert.equal(direct.direct_holdings_for_acknowledged_risks,true);
 assert(direct.instructions.includes('straight into the holdings instead of quarantine'));
+assert.equal(instructions.reuse_held_files,false,'files of other studies are reused only when asked');
+const reuse=model.agentInstructions([a],{catalogue_sha256:'hash'},{downloadScope:'full',reuseHeldFiles:true});
+assert.equal(reuse.reuse_held_files,true);
+assert(reuse.instructions.includes('no licence record, approval or AI-use permission is inherited'));
+assert(model.agentPrompt([a],reuse).includes('"reuse_held_files": true'));
+assert(model.agentCSV([a],reuse).includes('reuse_held_files'));
+assert.throws(()=>model.agentInstructions([a],{catalogue_sha256:'hash'},{reuseHeldFiles:true,downloadScope:'review_only'}),/needs a download scope/);
 assert(model.agentPrompt([a],direct).includes('"direct_holdings_for_acknowledged_risks": true'));
 assert.throws(()=>model.agentInstructions([a],{catalogue_sha256:'hash'},{directHoldings:true}),/full-release tasks/);
 assert.equal(instructions.kind,'datahunter_download_instructions');

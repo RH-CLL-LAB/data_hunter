@@ -20,6 +20,11 @@ exact-artifact approvals and licence-asset identities into the registries and la
 stay unbound or unsupported; `--execute` transfers the registered jobs: files with provider identities go straight into
 the locked holdings, acknowledged-risk files are staged in quarantine for the human release step. Every run is kept under
 runs/full_release/<run>/ and logged to the study. Downloading grants no AI-use permission.
+
+A release the user obtained themselves (after credentialing, an agreement, or from a provider without an automated route)
+enters through `--import-from ID=FOLDER`: the folder stands in for the provider manifest, identities come from the
+SHA256SUMS or MD5SUMS file the download brought along (without one the files need the missing-checksum acknowledgement),
+and the files are copied in under the same approval, identity, size and licence gates as a download.
 """
 from __future__ import annotations
 
@@ -49,7 +54,7 @@ from review_quarantine import refresh_dataset_entries  # noqa: E402
 
 CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CODE_ROOT / 'src'))
-from datahunter.workspace import workspace_root, require_workspace  # noqa: E402
+from datahunter.workspace import workspace_root, require_workspace, study_path  # noqa: E402
 from datahunter.data_rights import LicenseRegistry  # noqa: E402
 from datahunter.research_studies import default_study, append_log  # noqa: E402
 
@@ -375,6 +380,70 @@ def resolve_all(targets, unsupported, evidence):
             'blocked': None if resolved else (components[0]['blocked'] if components else 'unsupported_provider_manual_route')}
 
 
+CHECKSUM_FILES = {'sha256sums.txt': 'provider_sha256', 'sha256sums': 'provider_sha256', 'md5sums.txt': 'provider_md5', 'md5sums': 'provider_md5'}
+
+
+def resolve_folder(d, folder, evidence):
+    """A release the user obtained themselves, read from a local folder instead of the provider.
+
+    Every regular file is a release file; provider identities come from a SHA256SUMS or MD5SUMS file at the folder root
+    (retained as evidence), so the copy is verified against the provider's own hashes. Without one the files carry local
+    identities only and need the missing-checksum acknowledgement, exactly like an index-only release. A file the checksum
+    file lists but the folder lacks blocks the import: a full release is complete or it is not imported.
+    """
+    folder = Path(folder)
+    files = sorted(p for p in folder.rglob('*') if p.is_file() and not p.is_symlink())
+    identities, manifest, key = {}, None, None
+    for p in files:
+        if p.parent == folder and p.name.lower() in CHECKSUM_FILES:
+            manifest, key = p, CHECKSUM_FILES[p.name.lower()]
+            length = 64 if key == 'provider_sha256' else 32
+            for line in p.read_text('utf-8', 'replace').splitlines():
+                parts = line.split(None, 1)
+                if len(parts) == 2 and re.fullmatch(r'[0-9a-fA-F]{%d}' % length, parts[0]):
+                    identities[parts[1].strip().lstrip('*').removeprefix('./')] = parts[0].lower()
+            evidence.append((f"import_{slug(d['id'])}_{p.name}", p.read_bytes(), 'file://' + str(p)))
+            break
+    present = {p.relative_to(folder).as_posix(): p for p in files if p != manifest}
+    missing = sorted(set(identities) - set(present))
+    name = f'user-obtained release imported from {folder}'
+    if not present:
+        return {'blocked': 'import_folder_empty', 'release': name}
+    if missing:
+        return {'blocked': f'import_folder_incomplete_{len(missing)}_listed_files_missing', 'release': name, 'missing_files': missing[:20]}
+    target = detect(d.get('source_urls', []))
+    if target and target['provider'] == 'physionet':
+        base, component = f"https://physionet.org/files/{target['project']}/{target['version']}/", f"{slug(target['project'])}_{slug(target['version'])}"
+    else:
+        source = next((u for u in d.get('source_urls', []) if u.startswith('https://')), None)
+        if not source:
+            return {'blocked': 'import_needs_an_https_source_url_in_the_catalogue', 'release': name}
+        base, component = source.rstrip('/') + '/', slug(d['id'])
+    entries, sources = [], {}
+    for rel, p in present.items():
+        url = base + quote(rel)
+        entries.append({**file_entry(rel, url, p.stat().st_size, **({key: identities[rel]} if rel in identities else {})), 'folder': component})
+        sources[url] = {'path': p, 'bytes': p.stat().st_size, 'sha256': digest(p), 'folder': str(folder)}
+    return {'release': f'{name} ({len(entries)} files)', 'manifest': f'{manifest.name} supplied with the files' if manifest else 'none: local SHA-256 identities only (no checksum file supplied)',
+            'files': entries, 'folder': component, 'unsupported_urls': [], 'components': None, 'licence_label': None, 'imported_from': str(folder), 'import_sources': sources,
+            'checksum_file_entries': len(identities), 'files_without_provider_identity': sum(1 for rel in present if rel not in identities)}
+
+
+def import_folders(root, spec, import_from):
+    """Datasets whose release the user obtained themselves: id -> folder, checked before any provider is contacted."""
+    folders = {}
+    for dataset_id, folder in (import_from or {}).items():
+        if dataset_id not in spec['dataset_ids']:
+            raise ValueError('import_dataset_not_in_instructions: ' + dataset_id)
+        folder = Path(folder).expanduser().resolve()
+        if not folder.is_dir():
+            raise ValueError('import_folder_missing: ' + str(folder))
+        if folder.is_relative_to(Path(root).resolve() / 'data'):
+            raise ValueError('import_folder_inside_the_workspace_data: ' + str(folder))
+        folders[dataset_id] = folder
+    return folders
+
+
 # -------------------------------------------------------------------------------------------------------- gates
 def bindings_for(dataset_id, url, registry):
     """Licence records allowed for the dataset in the saved mode and study that cover this URL; software-only records bind nothing."""
@@ -615,7 +684,7 @@ def confirm_complete(root, completed, run_name):
 
 
 # -------------------------------------------------------------------------------------------------- execution
-def execute(root, ready, spec, mode, study_id, run_dir, journal, workers=4):
+def execute(root, ready, spec, mode, study_id, run_dir, journal, workers=4, reuse=None):
     """Acquire registered jobs: identity-backed files into the locked holdings, acknowledged-risk files into quarantine.
 
     `workers` transfers run at a time per dataset; the calling thread settles each finished transfer (lock, report,
@@ -641,8 +710,8 @@ def execute(root, ready, spec, mode, study_id, run_dir, journal, workers=4):
         allow = job.get('rights_unresolved') is True
         try:
             if job['technical_risks'] and not direct:
-                return d_id, job, 'quarantined', acquisition.acquire(item, {}, base=stage, execute=True, journal=journal, license_context=license_context, allow_unresolved_rights=allow)
-            return d_id, job, 'acquired', acquisition.acquire(item, locked, base=base, execute=True, journal=journal, license_context=license_context, allow_unresolved_rights=allow)
+                return d_id, job, 'quarantined', acquisition.acquire(item, {}, base=stage, execute=True, journal=journal, license_context=license_context, allow_unresolved_rights=allow, reuse=reuse)
+            return d_id, job, 'acquired', acquisition.acquire(item, locked, base=base, execute=True, journal=journal, license_context=license_context, allow_unresolved_rights=allow, reuse=reuse)
         except Exception as error:
             return d_id, job, 'failed', error
 
@@ -689,11 +758,26 @@ def execute(root, ready, spec, mode, study_id, run_dir, journal, workers=4):
                                                                               'source': 'resolve_full_release.py', 'quarantine_directory': str(stage.relative_to(root)),
                                                                               'unique_artifacts': staged, 'dataset_results': [], 'model_calls': 0, 'ai_use_authorized_by_download': False})
     return {'acquired': sum(1 for r in results.values() if r.get('state') == 'downloaded_verified'), 'failed': sum(1 for r in results.values() if r.get('state') == 'failed'),
-            'quarantined': len(staged), 'lock_files': len(locked)}
+            'quarantined': len(staged), 'lock_files': len(locked),
+            **({'copied_from_other_studies': sum(1 for r in results.values() if (r.get('copied_from') or {}).get('study')),
+                'imported_from_folders': sum(1 for r in results.values() if (r.get('copied_from') or {}).get('folder'))} if reuse is not None else {})}
 
 
 # -------------------------------------------------------------------------------------------------------- run
-def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, workers=4, only=None):
+def reuse_workspaces(root, names):
+    """Other study workspaces whose verified holdings this run may copy instead of downloading: ids under studies/ or paths."""
+    found = []
+    for name in names or []:
+        workspace = Path(name) if Path(name).is_dir() else study_path(name)
+        if workspace.resolve() == Path(root).resolve():
+            raise ValueError('reuse_study_is_this_study: ' + str(name))
+        if not (workspace / 'configs/research_resources.lock.json').is_file():
+            raise ValueError('reuse_study_has_no_lock: ' + str(name))
+        found.append(workspace)
+    return found
+
+
+def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, workers=4, only=None, reuse_from=None, import_from=None):
     root = Path(root).resolve()
     spec = agent.read_instructions(instructions_path)
     receipt = read(root / 'data/interim/dataset_selection/latest.json')
@@ -731,14 +815,23 @@ def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, w
     if only and set(only) - set(spec['dataset_ids']):
         raise ValueError('datasets_not_in_instructions: ' + ', '.join(sorted(set(only) - set(spec['dataset_ids']))))
     selected = [i for i in spec['dataset_ids'] if not only or i in only]  # a restricted run re-plans only these; the others keep their reservations against the total
-    journal('run_started', {'dataset_ids': spec['dataset_ids'], 'only': sorted(only) if only else None, 'license_mode': spec['license_mode'], 'study_id': study_id, 'register': register_jobs, 'execute': execute_jobs})
+    if reuse_from is None and spec.get('reuse_held_files') is True:  # the saved option: every other study workspace of this checkout that holds verified files
+        reuse_from = [str(p) for p in acquisition.workspaces_with_holdings_near(root)]
+    reuse_paths = reuse_workspaces(root, reuse_from)
+    reuse = acquisition.holdings_of(reuse_paths) if reuse_paths else None
+    imports = import_folders(root, spec, import_from)  # releases the user obtained themselves: their folders stand in for the provider
+    import_sources = {}
+    journal('run_started', {'dataset_ids': spec['dataset_ids'], 'only': sorted(only) if only else None, 'reuse_from': [p.name for p in reuse_paths], 'import_from': {i: str(f) for i, f in imports.items()}, 'reuse_held_files': spec.get('reuse_held_files') is True, 'license_mode': spec['license_mode'], 'study_id': study_id, 'register': register_jobs, 'execute': execute_jobs})
     held_bytes, reserved = committed_bytes(root, spec['dataset_ids'])
     outcomes, ready, completed, total_budget = [], {}, {}, held_bytes + sum(reserved.values())
     for dataset_id in selected:
         d = catalogue[dataset_id]
         route = d.get('access_route', '')
         evidence = []
-        if d.get('category') == 'excluded' or route == 'no_public_access_route':
+        if dataset_id in imports:  # the user obtained the release through the recorded route; its folder is the manifest
+            resolution = resolve_folder(d, imports[dataset_id], evidence)
+            import_sources.update(resolution.pop('import_sources', {}))
+        elif d.get('category') == 'excluded' or route == 'no_public_access_route':
             resolution = {'blocked': 'no_public_access_route', 'release': None}
         elif 'registration' in route and 'no_registration' not in route:
             resolution = {'blocked': 'blocked_access_' + route, 'release': None}
@@ -766,7 +859,7 @@ def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, w
                    'release_files': plan.get('release_files'), 'previously_held': plan.get('held'), 'new_jobs': len(plan['jobs']), 'unbound_files': plan.get('unbound_files', 0), 'unacknowledged_files': plan.get('unacknowledged_files', 0), 'rights_unresolved_files': plan.get('rights_unresolved_files', 0), 'unknown_size_files': plan.get('unknown_size_files', 0),
                    'unbound_sample': plan.get('unbound_sample', []), 'package_budget_bytes': plan.get('package_budget'), 'selection_committed_bytes_before': total_budget, 'withdrawn_jobs': withdrawn, 'expected_bytes': sum(j.get('expected_bytes', 0) for j in plan['jobs']),
                    'technical_risks': plan.get('risks'), 'unaccepted_risks': plan.get('unaccepted'), 'license_bindings': plan.get('bindings'), 'complete_release_registrable': plan.get('complete_release_registrable'),
-                   'evidence': evidence_items}
+                   'imported_from': resolution.get('imported_from'), 'missing_files': resolution.get('missing_files'), 'evidence': evidence_items}
         if plan['outcome'] in {'ready', 'ready_partial'}:
             total_budget += plan['package_budget']
             if register_jobs:
@@ -781,7 +874,8 @@ def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, w
     confirm_complete(root, completed, run_name)
     if completed:
         refresh_dataset_entries(root, set(completed))
-    executed = execute(root, ready, spec, spec['license_mode'], study_id, run_dir, journal, workers) if execute_jobs and ready else None
+    sources = {**(reuse or {}), **import_sources} if reuse is not None or import_sources else None  # bytes to copy instead of downloading: other studies' holdings and the user's folders
+    executed = execute(root, ready, spec, spec['license_mode'], study_id, run_dir, journal, workers, sources) if execute_jobs and ready else None
     if register_jobs:
         refresh_dataset_entries(root, set(selected))  # every dataset this run looked at, including size-blocked ones with withdrawn jobs or a stopped earlier run, gets its registry entry in line with the lock
     report = {'schema_version': 1, 'kind': 'datahunter_full_release_resolution', 'created_at': now(), 'run': str(run_dir.relative_to(root)), 'study_id': study_id, 'license_mode': spec['license_mode'], 'only': sorted(only) if only else None,
@@ -794,7 +888,7 @@ def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, w
         append_log(root, study_id, [{'at': now(), 'action': 'download_run', 'source': 'resolve_full_release.py', 'run': report['run'],
                                      'detail': (f"Full-release resolution ({'executed' if execute_jobs else 'registered'}, licence {spec['license_mode']}{', restricted to ' + ', '.join(sorted(only)) if only else ''}): "
                                                 + '; '.join(f"{o['dataset']}: {o['outcome']}" + (f" ({o['new_jobs']} jobs, {o['expected_bytes']:,} bytes" + (f", {o['unbound_files']} unbound" if o['unbound_files'] else '') + (f", {o['unacknowledged_files']} need an acknowledgement" if o['unacknowledged_files'] else '') + (f", {o['rights_unresolved_files']} rights-unresolved" if o['rights_unresolved_files'] else '') + ')' if o['new_jobs'] else '') for o in outcomes)
-                                                + (f". Transfers: {executed['acquired']} locked, {executed['quarantined']} quarantined, {executed['failed']} failed." if executed else '')
+                                                + (f". Transfers: {executed['acquired']} locked, {executed['quarantined']} quarantined, {executed['failed']} failed" + (f", {executed['copied_from_other_studies']} copied from {', '.join(p.name for p in reuse_paths)}" if executed.get('copied_from_other_studies') else '') + (f", {executed['imported_from_folders']} imported from {', '.join(f'{i} ({f})' for i, f in imports.items())}" if executed.get('imported_from_folders') else '') + '.' if executed else '')
                                                 + ' Downloading grants no AI-use permission.')[:1000]}])
     print(json.dumps({'run': report['run'], 'counts': report['counts'], 'execution': executed}))
     return report
@@ -807,8 +901,16 @@ def main(argv=None):
     parser.add_argument('--execute', action='store_true', help='Also transfer the registered jobs (implies --register)')
     parser.add_argument('--workers', type=int, default=4, choices=range(1, 9), help='Concurrent transfers per dataset (default 4, as in acquire_research_resources.py)')
     parser.add_argument('--datasets', nargs='+', metavar='ID', help='Only these datasets of the saved instructions (a retry after a provider outage); the others keep their reservations against the total cap')
+    parser.add_argument('--reuse-from-study', nargs='+', metavar='STUDY', help='Copy files another study workspace already holds and verified (study id under studies/ or a workspace path) instead of downloading them; identity checks and this study’s permission gates still apply')
+    parser.add_argument('--import-from', nargs='+', metavar='ID=FOLDER', help='A release you obtained yourself (after credentialing, an agreement or from a provider without an automated route): the folder stands in for the provider manifest; keep the provider’s SHA256SUMS or MD5SUMS file in it so the copy is verified against the provider’s hashes; the same approval, size and licence gates apply')
     args = parser.parse_args(argv)
-    return run(args.instructions, register_jobs=args.register or args.execute, execute_jobs=args.execute, workers=args.workers, only=args.datasets)
+    imports = {}
+    for item in args.import_from or []:
+        if '=' not in item:
+            parser.error('--import-from takes ID=FOLDER')
+        dataset_id, folder = item.split('=', 1)
+        imports[dataset_id] = folder
+    return run(args.instructions, register_jobs=args.register or args.execute, execute_jobs=args.execute, workers=args.workers, only=args.datasets, reuse_from=args.reuse_from_study, import_from=imports or None)
 
 
 if __name__ == '__main__':
