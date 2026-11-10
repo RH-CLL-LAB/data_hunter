@@ -60,7 +60,7 @@ BROWSER_ACTIONS = {
 # Written only by the scripts that perform them; a browser export can never claim one.
 EXECUTED_ACTIONS = {
     'study_registered', 'study_updated', 'study_removed', 'discovery_run', 'report_added',
-    'download_run', 'licence_review_registered', 'file_task_run',
+    'download_run', 'licence_review_registered', 'file_task_run', 'quarantine_release',
 }
 LOG_ACTIONS = BROWSER_ACTIONS | EXECUTED_ACTIONS
 

@@ -504,6 +504,10 @@ def main():
     write(BASE / 'latest.json', {'selection': str((folder / 'selection.json').relative_to(ROOT)),
                                'selection_sha256': file_digest(folder / 'selection.json'),
                                'document': str(DOC.relative_to(ROOT)), 'document_sha256': file_digest(DOC), 'summary': summary})
+    from review_quarantine import inventory
+    inventory(ROOT)  # current quarantine listing for the status document and the Quarantine page
+    from report_dataset_status import write_document
+    write_document(ROOT)  # docs/DATASET_STATUS.md: one state per dataset and the action it needs
     from build_dataset_browser import build
     build()
     print(json.dumps(summary, indent=2))

@@ -71,6 +71,44 @@ class ResearchAcquisitionTests(unittest.TestCase):
         self.assertEqual((self.root / 'sample.txt').read_bytes(), self.payload)
         self.assertEqual(record['hash_authority'], 'provider_MD5_plus_local_SHA256')
 
+    def test_transfer_uses_a_stall_timeout_instead_of_a_fixed_cap(self):
+        events, commands = [], []
+        fake = self.transfer(self.payload, events)
+        with patch.object(module.subprocess, 'run', side_effect=lambda command, **kwargs: (commands.append(command), fake(command, **kwargs))[1]):
+            module.acquire(self.item, {}, self.root, execute=True, journal=lambda *args: events.append(args))
+        command = commands[0]
+        self.assertNotIn('--max-time', command, 'a full release may take longer than any fixed cap; only a stalled connection fails')
+        self.assertNotIn('--continue-at', command, 'a first attempt starts from the beginning')
+        for flag, value in (('--connect-timeout', '20'), ('--speed-time', '120'), ('--speed-limit', '1024')):
+            self.assertEqual(command[command.index(flag) + 1], value)
+
+    def test_a_dropped_transfer_resumes_from_its_partial_and_stops_without_progress(self):
+        events, commands = [], []
+
+        def flaky(command, **kwargs):
+            commands.append(command)
+            out = Path(command[command.index('--output') + 1])
+            if len(commands) == 1:
+                out.write_bytes(self.payload[:8])
+                return SimpleNamespace(returncode=56, stderr='curl: (56) Recv failure')
+            self.assertEqual(command[command.index('--continue-at') + 1], '-', 'the second attempt resumes the retained partial')
+            out.write_bytes(self.payload)
+            return SimpleNamespace(returncode=0, stderr='')
+        with patch.object(module.subprocess, 'run', side_effect=flaky), patch.object(module.time, 'sleep', lambda seconds: None):
+            record = module.acquire(self.item, {}, self.root, execute=True, journal=lambda *args: events.append(args))
+        self.assertEqual((len(commands), record['state'], (self.root / 'sample.txt').read_bytes()), (2, 'downloaded_verified', self.payload))
+        (self.root / 'sample.txt').unlink()
+        commands.clear()
+
+        def dead(command, **kwargs):
+            commands.append(command)
+            Path(command[command.index('--output') + 1]).write_bytes(b'')
+            return SimpleNamespace(returncode=28, stderr='curl: (28) Operation too slow')
+        with patch.object(module.subprocess, 'run', side_effect=dead), patch.object(module.time, 'sleep', lambda seconds: None):
+            with self.assertRaisesRegex(RuntimeError, 'curl_exit_28'):
+                module.acquire(self.item, {}, self.root, execute=True, journal=lambda *args: events.append(args))
+        self.assertEqual(len(commands), 1, 'an attempt that made no progress is not repeated')
+
     def test_bad_transfer_retains_partial_without_promoting(self):
         events = []
         with patch.object(module.subprocess, 'run', side_effect=self.transfer(b'bad', events)):
@@ -224,6 +262,17 @@ class DownloadReviewTests(unittest.TestCase):
         (self.root/'dictionary.txt').write_text('different schema')
         with self.assertRaisesRegex(ValueError,'metadata_missing_or_changed'):
             module.require_download_review(self.item,{})
+
+    def test_review_registry_is_parsed_once_until_its_bytes_change(self):
+        self.approve();p=self.root/'configs/dataset_download_reviews.json'
+        first=module.require_download_review(self.item,{})
+        self.assertEqual(first['review_registry_sha256'],hashlib.sha256(p.read_bytes()).hexdigest())
+        self.assertIs(module.parsed_json(p)[0],module.parsed_json(p)[0],'an unchanged registry is parsed once per process')
+        r=json.loads(p.read_text());r['approved_artifacts'][0]['max_bytes']=2000;p.write_text(json.dumps(r))
+        with self.assertRaisesRegex(ValueError,'identity_or_budget_changed'):
+            module.require_download_review(self.item,{})
+        again=module.require_download_review({**self.item,'max_bytes':2000},{})
+        self.assertEqual(again['review_registry_sha256'],hashlib.sha256(p.read_bytes()).hexdigest(),'a changed registry is re-read and re-hashed')
 
     def test_checklist_without_access_cannot_approve_bulk(self):
         self.approve();p=self.root/'configs/dataset_download_reviews.json';r=json.loads(p.read_text())

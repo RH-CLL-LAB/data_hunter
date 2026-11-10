@@ -75,6 +75,34 @@ Do not borrow the default study's approval for another study's purpose. Study an
 or a shortlist select candidates; neither grants permission. Register the supplied
 research profile before downloads if necessary, and retain its context in the run.
 
+## Open-access files with unresolved licence
+
+When the saved instructions carry `acquire_unresolved_rights: true`, files of datasets on an open
+access route (no registration, agreement or login) may be transferred although no licence record
+allows their AI use: only through approvals flagged `rights_unresolved_download`, only with the
+usual identity, size and byte-cap checks, never over an explicit prohibition, and never for a
+registration route. They are recorded as rights-unresolved (status `downloaded_rights_unresolved`
+in the download agent, `rights: unresolved_at_acquisition` in the acquisition report), receive no
+licence asset, and the preflight keeps them blocked until a licence review registers the terms.
+The option widens acquisition, not permission.
+
+With `direct_holdings_for_acknowledged_risks: true` (full-release tasks only) the resolver takes files
+transferred under an accepted technical exception straight into the locked holdings instead of
+quarantine, recording the uncertainty on each (`identity: local_sha256_only`, `technical_risks`) and
+the dataset's `data_caveats` (what is uncertain, where to look, what to check). It never relaxes the
+identity checks that do exist, the byte caps, the access routes or the AI-use preflight.
+
+## Quarantine review
+
+Staged deliveries are listed with `Scripts/review_quarantine.py list` and shown on the study's
+Quarantine page with the reason each file is there (accepted technical exception, or staged
+without promotion) and its state (pending review, superseded duplicate, changed, orphan, missing).
+The user ticks what to release or discard and saves a `datahunter_quarantine_release` request;
+validate it with `--request FILE`, then apply it with `--apply` (add `--reverify-download` to
+compare a second download). A release re-verifies the staged bytes, runs the acquisition format
+checks, locks the file and binds its licence assets; it grants no AI use. Never release changed,
+orphan or missing files from the page, and never delete a duplicate whose held copy is gone.
+
 ## Study log
 
 `Scripts/run_download_agent.py` appends a `download_run` entry to the study's

@@ -449,6 +449,7 @@ def main():
         if not families:
             families = [d['id'].lower()]
         results.append({**{k: d[k] for k in ['id', 'name', 'scope', 'source_urls', 'uses', 'missing_components', 'next_action', 'access_route', 'registration_url', 'completeness', 'priority']},
+                        'data_caveats': d.get('data_caveats', []),
                         'validation_id': validation_id, 'category': group,
                         'workspace': 'data/datasets/' + group + '/' + d['id'],
                         'optimization_status': development, 'benchmark_status': benchmark,

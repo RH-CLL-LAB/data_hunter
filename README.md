@@ -31,7 +31,7 @@ Licence: [Apache 2.0](LICENSE). Citation: see [How to cite](#how-to-cite).
 | Part | Where | What it does |
 |---|---|---|
 | The site | `studies/<id>/docs/dataset-browser/` (generated per study), `Scripts/build_dataset_browser.py`, `Scripts/dataset_browser/` | Research studies, licence-first dataset search, catalogue with filters and shortlists, dataset records, licence decisions, download and file tasks, tutorial. |
-| Workflow scripts | `Scripts/` | Study registration and switching, logging, intake and download agents, licence review and audit, workspace validation, catalogue documentation, link audit, local site server. See `Scripts/README.md`. |
+| Workflow scripts | `Scripts/` | Study registration and switching, logging, intake and download agents, full-release resolution, quarantine review, licence review and audit, workspace validation, catalogue documentation, status and data-structure reports, link audit, local site server. See `Scripts/README.md`. |
 | Agent definitions | `agents/` | The roles a coding agent follows for intake, licence review, downloads and file operations. |
 | Study folders | `studies/<id>/` | Everything one study produces, in one place: its registries (`configs/`), retained notices, quarantine and acquired data (`data/`), intake, download and review runs (`runs/`), reports, action log and generated site (`docs/`). Created empty when a study is registered; never committed. |
 | Registry templates | `templates/study/configs/` | The empty registries a new study folder starts from. |
@@ -145,7 +145,20 @@ for a study without sources the build creates the empty state itself.
 5. **Prepare downloads and file tasks** from the selection bar as prompts, JSON
    or CSV for `agents/dataset-download-agent.md` and
    `agents/dataset-operations-agent.md`. Downloading grants no AI-use permission.
-6. **Re-export and register the study** after changing its shortlist or
+   The dialog also offers to download open-access files whose licence is not yet
+   resolved: identity and size checks still apply, no licence record is created, and the
+   files stay blocked for AI use until a licence review.
+6. **Read the status and act on what is blocked**: the Status & actions page shows one state per
+   dataset (obtained automatically, partial, action needed, no route) with the one step each
+   needs from you; the Quarantine page lists staged deliveries with the reason each is there and
+   lets you tick what the agent should release or discard (`Scripts/review_quarantine.py`). A
+   full-release request is resolved from the providers' own manifests by
+   `Scripts/resolve_full_release.py`. The **Data structure** page
+   (`Scripts/report_dataset_structure.py`) shows what is inside the held files, table by table: columns,
+   types, missingness and descriptive statistics; for datasets you still need to apply for, it shows the
+   access route, what the held demo releases of the same family indicate about the layout, and the
+   retained documentation, so you know what to expect before you register.
+7. **Re-export and register the study** after changing its shortlist or
    annotations; retire one with `--remove STUDY_ID --apply` (its folder is
    kept). Every important action is appended to `studies/<id>/actions.jsonl`.
 

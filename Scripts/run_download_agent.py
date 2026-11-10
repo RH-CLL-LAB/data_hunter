@@ -26,6 +26,7 @@ from datahunter.data_rights import LicenseRegistry
 from collections import Counter
 from datahunter.research_studies import default_study, append_log as append_study_log, normalize as normalize_study, registered as registered_study, fingerprint as study_fingerprint
 
+UNRESOLVED_RIGHTS_WARNING='Acquired under the explicit unresolved-rights option: open access, no licence decision recorded. AI use stays blocked until a licence review registers the terms.'
 RISKS={
  'missing_provider_checksum':'No provider checksum/trusted identity is available. A local SHA-256 records the downloaded bytes but cannot prove they match the intended provider artifact.',
  'unknown_advertised_size':'The provider has not supplied an exact byte size. A hard transfer cap still applies; a failed or oversized transfer may leave a partial file.'
@@ -46,7 +47,7 @@ def read_instructions(path):
         rows=list(reader)
     common=['schema_version','kind','catalogue_sha256','license_mode','max_bytes_per_artifact','max_total_bytes','technical_risk_acknowledgements']
     if not rows or any(key not in reader.fieldnames for key in ['id',*common]):raise ValueError('not_agent_instructions_csv')
-    common.extend(key for key in ['download_scope','download_requested','max_bytes_per_dataset','research_study'] if key in reader.fieldnames)
+    common.extend(key for key in ['download_scope','download_requested','max_bytes_per_dataset','research_study','acquire_unresolved_rights','direct_holdings_for_acknowledged_risks'] if key in reader.fieldnames)
     if any(None in row or any(row[k]!=rows[0][k] for k in common) for row in rows):raise ValueError('inconsistent_csv_agent_settings')
     first=rows[0]
     scope=first.get('download_scope','minimal')
@@ -56,7 +57,9 @@ def read_instructions(path):
             'max_total_bytes':int(first['max_total_bytes']),'max_bytes_per_dataset':int(first.get('max_bytes_per_dataset',MAX_DATASET_BYTES)),'technical_risk_acknowledgements':json.loads(first['technical_risk_acknowledgements']),
             'dataset_ids':[row['id'] for row in rows],'download_scope':scope,'download_requested':first.get('download_requested',str(scope!='review_only').lower())=='true',
             'agent_definition':'agents/dataset-download-agent.md' if scope=='minimal' else 'agents/dataset-intake-agent.md',
-            'selected_context':rows,'source_format':'csv',**({'research_study':normalize_study(json.loads(first['research_study']))} if first.get('research_study') else {})}
+            'selected_context':rows,'source_format':'csv',**({'research_study':normalize_study(json.loads(first['research_study']))} if first.get('research_study') else {}),
+            **({'acquire_unresolved_rights':first['acquire_unresolved_rights']=='true'} if first.get('acquire_unresolved_rights') in {'true','false'} else {}),
+            **({'direct_holdings_for_acknowledged_risks':first['direct_holdings_for_acknowledged_risks']=='true'} if first.get('direct_holdings_for_acknowledged_risks') in {'true','false'} else {})}
 
 
 def validate_instructions(spec,catalogue_sha):
@@ -68,6 +71,8 @@ def validate_instructions(spec,catalogue_sha):
     if spec.get('license_mode') not in {'lenient','restrictive'}:raise ValueError('explicit_lenient_or_restrictive_license_mode_required')
     scope=spec.get('download_scope','minimal')
     if scope not in {'review_only','minimal','full'} or ('download_requested' in spec and spec['download_requested'] is not (scope!='review_only')):raise ValueError('invalid_or_inconsistent_download_scope')
+    if 'acquire_unresolved_rights' in spec and (type(spec['acquire_unresolved_rights']) is not bool or (spec['acquire_unresolved_rights'] and scope=='review_only')):raise ValueError('invalid_acquire_unresolved_rights_option')
+    if 'direct_holdings_for_acknowledged_risks' in spec and (type(spec['direct_holdings_for_acknowledged_risks']) is not bool or (spec['direct_holdings_for_acknowledged_risks'] and scope!='full')):raise ValueError('invalid_direct_holdings_option')
     acknowledgements=spec.get('technical_risk_acknowledgements',[])
     if not isinstance(acknowledgements,list) or any(r not in RISKS for r in acknowledgements):raise ValueError('invalid_technical_risk_acknowledgement')
     for key in ['max_bytes_per_artifact','max_total_bytes']:
@@ -115,20 +120,21 @@ def process_job(job,locked,stage,original,acknowledgements,execute,caps,journal,
     # Both the scope gate and exact metadata/download gate run before any request.
     try:review=acquisition.require_download_review(job,locked)
     except Exception as err:return {'id':job['id'],'status':'blocked_review_or_access','problem':str(err)}
-    if license_report.get('status')!='allowed':return {'id':job['id'],'status':'blocked_license','license_preflight':license_report}
+    unresolved=license_report.get('status')!='allowed' and caps.get('acquire_unresolved_rights') is True and review.get('rights_unresolved_download') is True
+    if license_report.get('status')!='allowed' and not unresolved:return {'id':job['id'],'status':'blocked_license','license_preflight':license_report}
     budget=job.get('max_bytes',64*1024**2)
     if type(budget) is not int or budget<=0 or budget>caps.get('max_bytes_per_dataset',MAX_DATASET_BYTES) or budget>caps['max_bytes_per_artifact'] or used[0]+budget>caps['max_total_bytes']:
         return {'id':job['id'],'status':'blocked_byte_budget','artifact_cap':budget,'reserved_total':used[0]}
     risks=technical_risks(job,locked)
     unaccepted=[r for r in risks if r not in acknowledgements]
-    result={'id':job['id'],'technical_risks':risks,'warnings':[RISKS[r] for r in risks],'download_review':review}
+    result={'id':job['id'],'technical_risks':risks,'warnings':[RISKS[r] for r in risks]+([UNRESOLVED_RIGHTS_WARNING] if unresolved else []),'download_review':review,'rights_unresolved':unresolved}
     if unaccepted:return {**result,'status':'needs_technical_risk_acknowledgement','unaccepted':unaccepted}
     used[0]+=budget
     if not execute:return {**result,'status':'eligible_dry_run','transfer_cap':budget}
     journal('transfer_authorized',{'resource_id':job['id'],'url':job['url'],'risks':risks,'acknowledged':sorted(acknowledgements),'hard_cap':budget})
     try:
-        record=acquisition.acquire(job,locked,base=stage,execute=True,journal=journal,license_context={'mode':license_report.get('mode','lenient'),'study_id':license_report.get('study_id') or license_report.get('default_study') or 'baseline'})
-        return {**result,'status':'downloaded_quarantined' if risks else 'downloaded_staged_verified','record':record,
+        record=acquisition.acquire(job,locked,base=stage,execute=True,journal=journal,allow_unresolved_rights=unresolved,license_context={'mode':license_report.get('mode','lenient'),'study_id':license_report.get('study_id') or license_report.get('default_study') or 'baseline'})
+        return {**result,'status':'downloaded_quarantined' if risks else 'downloaded_rights_unresolved' if unresolved else 'downloaded_staged_verified','record':record,
                 'promotion':'Not added to the original acquisition lock or cleared for workflow AI; inspect and register the approved delivered version first.'}
     except Exception as err:return {**result,'status':'transfer_failed','problem':str(err),'partial_files_retained':True}
 
@@ -176,7 +182,7 @@ def run(instructions_path,execute=False,root=ROOT):
             result={'dataset':id,'status':'blocked_dataset_size_limit','manifest_budget_upper_bound':package_budget,'max_bytes_per_dataset':spec.get('max_bytes_per_dataset',MAX_DATASET_BYTES),'remaining_work':d['missing_components'],'note':'Reviewed package byte budgets exceed the per-dataset cap. No subset was transferred for this dataset; review exact sizes/budgets rather than silently lowering a full-release request.'}
         elif spec.get('download_scope','minimal')!='minimal':
             result={'dataset':id,'status':'review_only_no_transfer' if spec['download_scope']=='review_only' else 'full_release_review_required',
-                    'remaining_work':d['missing_components'],'note':'Pass this task to Claude Code or Codex with agents/dataset-intake-agent.md. This minimal-artifact executor does not infer complete provider-release scope or transfer any subset for a full request.'}
+                    'remaining_work':d['missing_components'],'note':'Pass this task to Claude Code or Codex with agents/dataset-intake-agent.md, which resolves the complete provider release with Scripts/resolve_full_release.py. This minimal-artifact executor does not infer complete provider-release scope or transfer any subset for a full request.'}
         elif not jobs:
             if d['obtained_artifacts']:
                 bad=[f['path'] for f in d['obtained_artifacts'] if not (root/f['path']).is_file() or sha(root/f['path'])!=f['sha256']]

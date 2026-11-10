@@ -244,7 +244,7 @@
     const message=document.querySelector('[data-agent-dialog-message]');
     try{
       const rows=getAgentRows(),acknowledgements=[...document.querySelectorAll('[data-agent-risk]:checked')].map(c=>c.value);
-      const spec=window.DataHunterSelection.agentInstructions(rows,agentContext,{acknowledgements,downloadScope:agentDialog.querySelector('[name="agent-download-scope"]:checked').value,licenseMode:document.querySelector('[name="agent-license-mode"]:checked').value,datasetGB:document.querySelector('[data-agent-dataset]').value,maxGB:document.querySelector('[data-agent-max]').value,totalGB:document.querySelector('[data-agent-total]').value});
+      const spec=window.DataHunterSelection.agentInstructions(rows,agentContext,{acknowledgements,downloadScope:agentDialog.querySelector('[name="agent-download-scope"]:checked').value,licenseMode:document.querySelector('[name="agent-license-mode"]:checked').value,acquireUnresolvedRights:document.querySelector('[data-agent-unresolved]')?.checked===true,directHoldings:document.querySelector('[data-agent-direct-holdings]')?.checked===true,datasetGB:document.querySelector('[data-agent-dataset]').value,maxGB:document.querySelector('[data-agent-max]').value,totalGB:document.querySelector('[data-agent-total]').value});
       generatedDownload=spec;generatedDownloadRows=rows;
       agentDialog.querySelector('[data-agent-preview]').textContent=window.DataHunterSelection.agentPrompt(rows,spec);
       const preview=agentDialog.querySelector('[data-agent-preview-box]');preview.hidden=false;preview.open=true;

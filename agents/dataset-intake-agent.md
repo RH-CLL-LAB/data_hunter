@@ -91,6 +91,17 @@ instruction or permission to expand another dataset.
    active acquisition manifest for every requested scope.
    Keep acquisition timestamps, source URL/version, checksums and licence evidence.
    Use `agents/dataset-download-agent.md` and the source-bound licensing gate.
+   For `full`, run `Scripts/resolve_full_release.py --instructions <file>` first: it pins every
+   supported source's manifest (PhysioNet, Zenodo, GitHub, Hugging Face, OpenML, UCI), applies the
+   size, identity and licence-binding gates and reports blocked datasets with the exact reason;
+   `--register` writes the bindable jobs and `--execute` transfers them (acknowledged-risk files go
+   to quarantine). Add licence records (with `covers_urls` when a record covers only some files)
+   before re-running; never widen a record to files it does not cover. With
+   `acquire_unresolved_rights: true` in the instructions, the resolver also registers open-access
+   files that no licence record covers, flagged `rights_unresolved_download`; they are acquired
+   without any licence asset and stay blocked for AI use until a licence review. With
+   `direct_holdings_for_acknowledged_risks: true`, acknowledged-exception files skip quarantine and are
+   locked with their uncertainty recorded as dataset `data_caveats`; always report these caveats.
    Missing access or permission remains a blocked/manual action. Staging does not
    authorize workflow AI. Do not enlarge requested transfer limits silently.
 6. Preserve all existing provider bytes and sealed runs. Keep
@@ -99,8 +110,12 @@ instruction or permission to expand another dataset.
    new acquisition identities with actual timestamps; never invent old dates.
 7. Refresh in order: `Scripts/audit_dataset_downloads.py`,
    `Scripts/validate_dataset_workspace.py`, `Scripts/document_dataset_selection.py`
-   (also rebuilds HTML), then the HTML link audit/rebuild and
-   `Scripts/build_data_provenance.py`. Run relevant deterministic tests. Do not
+   (also refreshes the quarantine listing, writes `docs/DATASET_STATUS.md` and rebuilds HTML),
+   then the HTML link audit. Save the dated status report with
+   `Scripts/report_dataset_status.py --report` at the end of an acquisition run, and refresh the
+   Data structure page with `Scripts/report_dataset_structure.py --report` (deterministic column and
+   statistics census of the held files; its output is dictionary-like source content and stays under the
+   AI preflight). Run relevant deterministic tests. Do not
    declare successful registration until the regenerated receipt/catalogue agrees
    and the entry is visible. If validation fails, preserve the failed receipt,
    report the blocker and leave readiness conservative.

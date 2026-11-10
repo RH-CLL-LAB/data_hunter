@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -37,6 +38,24 @@ BASE = ROOT / 'data/acquisitions'
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+_PARSED = {}  # path -> (size, mtime_ns, parsed JSON, sha256)
+_PARSED_GUARD = threading.Lock()  # concurrent transfers must not each parse the registry
+
+
+def parsed_json(path):
+    """The parsed file and its SHA-256, re-read only when its size or modification time changes.
+
+    The download-review registry is consulted twice per transfer and a full-release registration
+    adds an approval per file to it, so parsing it for every transfer dominated the transfer time.
+    """
+    stat = path.stat()
+    with _PARSED_GUARD:
+        cached = _PARSED.get(path)
+        if cached is None or cached[:2] != (stat.st_size, stat.st_mtime_ns):
+            cached = _PARSED[path] = (stat.st_size, stat.st_mtime_ns, json.loads(path.read_text()), digest(path))
+    return cached[2], cached[3]
 
 
 def validate_scope(manifest):
@@ -63,7 +82,7 @@ def require_download_review(item, locked):
     if item.get('kind') in references and item.get('max_bytes', 64*1024**2) <= 5*1024**2:
         return {'basis': 'bounded_reviewed_reference_only'}
     registry_path = ROOT / 'configs/dataset_download_reviews.json'
-    registry = json.loads(registry_path.read_text()) if registry_path.exists() else {}
+    registry, registry_sha256 = parsed_json(registry_path) if registry_path.exists() else ({}, None)
     approvals = [r for r in registry.get('approved_artifacts', []) if r.get('id') == item['id']]
     if len(approvals) != 1:
         raise ValueError('metadata_preflight_required_before_new_dataset_download: ' + item['id'])
@@ -85,7 +104,8 @@ def require_download_review(item, locked):
         path = contained(ROOT, evidence['path'])
         if not path.is_file() or digest(path) != evidence['sha256']:
             raise ValueError('download_review_metadata_missing_or_changed')
-    return {'basis': 'metadata_reviewed_minimal_subset', 'review_registry_sha256': digest(registry_path)}
+    return {'basis': 'metadata_reviewed_minimal_subset', 'review_registry_sha256': registry_sha256,
+            'rights_unresolved_download': approval.get('rights_unresolved_download') is True}
 
 
 def transfer_license_preflight(item, locked, reviews=None, registry=None):
@@ -104,7 +124,7 @@ def transfer_license_preflight(item, locked, reviews=None, registry=None):
     operations = ['local_inference', 'local_embedding']
     if reviews is None:
         path = ROOT / 'configs/dataset_download_reviews.json'
-        reviews = json.loads(path.read_text()) if path.exists() else {}
+        reviews = parsed_json(path)[0] if path.exists() else {}
     source_ids = {r['id'] for r in reviews.get('reviews', []) if item['id'] in r.get('resource_aliases', [])}
     bindings = [r for r in reviews.get('approved_artifacts', []) if r.get('id') == item['id']]
     for binding in bindings:
@@ -254,7 +274,7 @@ def inspect_zip(path, profile=None, *, inspect_csv=True, max_uncompressed=2 * 10
             'uncompressed_bytes': sum(x['bytes'] for x in members)}
 
 
-def acquire(item, locked, base=BASE, *, execute=False, journal=None, license_context=None):
+def acquire(item, locked, base=BASE, *, execute=False, journal=None, license_context=None, allow_unresolved_rights=False):
     if item.get('acquisition') != 'direct':
         return {'id': item['id'], 'state': item['acquisition'], 'reason': item['reason']}
     path = contained(base, item['path'])
@@ -282,7 +302,11 @@ def acquire(item, locked, base=BASE, *, execute=False, journal=None, license_con
             registry = LicenseRegistry(ROOT/'configs/data_licenses.json',ROOT/'configs/data_license_assets.json',root=ROOT,**license_context)
         rights = transfer_license_preflight(item, locked, registry=registry)
         if rights['status'] != 'allowed':
-            raise ValueError('dataset_license_required_before_transfer: ' + item['id'])
+            # The explicit unresolved-rights option: the instructions asked for it AND this exact approval carries the flag.
+            # It widens acquisition only; no licence record is created and the file stays blocked for AI use.
+            if not (allow_unresolved_rights and review.get('rights_unresolved_download')) or rights.get('reason') in {'explicit_source_ai_prohibition_before_acquisition', 'manual_source_prohibition_before_acquisition'}:
+                raise ValueError('dataset_license_required_before_transfer: ' + item['id'])
+            rights = {**rights, 'status': 'rights_unresolved_download_accepted'}
         review = {**review, 'license_preflight': rights}
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(path.name + '.part')
@@ -293,11 +317,15 @@ def acquire(item, locked, base=BASE, *, execute=False, journal=None, license_con
     if journal:
         journal('transfer_started', {'id': item['id'], 'url': item['url'], 'path': item['path'],
                                      'download_preflight': review})
-    result = subprocess.run(['curl', '--fail', '--location', '--silent', '--show-error',
-                             '--proto', '=https', '--proto-redir', '=https',
-                             '--connect-timeout', '20', '--max-time', '600',
-                             '--max-filesize', str(item.get('max_bytes', 64 * 1024**2)),
-                             '--output', str(partial), item['url']], capture_output=True, text=True)
+    command = ['curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https', '--proto-redir', '=https',
+               '--connect-timeout', '20', '--speed-time', '120', '--speed-limit', '1024',  # a connection stalled below 1 KB/s for two minutes fails; a slow provider may take as long as a full release needs
+               '--max-filesize', str(item.get('max_bytes', 64 * 1024**2)), '--output', str(partial), item['url']]
+    for attempt in range(5):  # a dropped connection resumes from the partial this transfer retained (curl fixes the offset when it starts, so a resume is a new invocation); an attempt without progress ends the transfer
+        before = partial.stat().st_size if partial.exists() else 0
+        result = subprocess.run(command + (['--continue-at', '-'] if before else []), capture_output=True, text=True)
+        if result.returncode == 0 or not partial.exists() or partial.stat().st_size <= before:
+            break
+        time.sleep(10)
     if result.returncode:
         raise RuntimeError(f'curl_exit_{result.returncode}; partial retained; {result.stderr[-160:]}')
     inspection = validate(partial, item)

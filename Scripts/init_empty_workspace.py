@@ -68,6 +68,17 @@ def ensure_empty_state(root=ROOT, force=False):
         'with its URL, retrieval date and hash, and record a decision with the licence-review agent. Holding a file '
         'is never permission to use it; lenient mode blocks only explicit applicable AI prohibitions, strict mode also '
         'requires explicit AI approval, and both require underlying access and use rights.\n')
+    status = docs / 'DATASET_STATUS.md'
+    status.write_text(
+        '# Dataset status and next actions\n\n'
+        'No datasets are registered yet. Once the catalogue is built, this page shows one state per dataset: obtained automatically, partial, '
+        'the one action it needs from you, or no route; plus quarantine contents and licence records awaiting confirmation.\n')
+    structure = docs / 'DATASET_STRUCTURE.md'
+    structure.write_text(
+        '# Data structure: tables, columns, types and statistics\n\n'
+        'No files are held yet. Once datasets are acquired, `Scripts/report_dataset_structure.py` profiles every held table (columns, types, '
+        'missingness, descriptive statistics) and, for the datasets that are not held, lists what the held releases of the same family and the '
+        'retained documentation show before you apply for access.\n')
     licences = docs / 'DATA_LICENSES_AND_AI_USE.md'
     licences.write_text(
         '# Data licences and allowed/restricted AI use\n\n'
@@ -79,7 +90,7 @@ def ensure_empty_state(root=ROOT, force=False):
         '- **Restrictive**: the same rights checks plus explicit AI approval.\n\n'
         'Local inference, remote inference, embeddings, training and redistribution are separate decisions. '
         'An AI-silent licence is not explicit approval. Never infer data rights from a software licence.\n')
-    written += [catalogue, priorities, licences]
+    written += [catalogue, priorities, status, structure, licences]
 
     # Validation report and receipt.
     validation_id = stamp
