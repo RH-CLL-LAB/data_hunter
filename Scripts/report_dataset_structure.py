@@ -1131,7 +1131,85 @@ def collect(root, options=None, only=None, reuse=True):
 # ======== Rendering. Nothing below this line changes a file profile; profile reuse hashes only the code above it. ========
 
 
-def column_row(column):
+def prose(value, limit=48):
+    """A value read from a data file, as Markdown text outside a code span: like cell(), with the characters that would
+    start a link, emphasis or an escape escaped, so a value such as `.scopes[Role](classCode=IDENT)` stays text."""
+    text = CONTROL_RE.sub('', str(value)).replace('\n', ' ').replace('`', "'")
+    text = text if len(text) <= limit else text[:limit - 1] + '…'
+    return re.sub(r'([\\\[\]*|])', r'\\\1', text)
+
+
+# Table layout: inferred from the column names and the census statistics only, so it never needs the files read again.
+ATTRIBUTE_NAME_RE = re.compile(r'(?:^|[_ .\-])(?:item_?id|item|code|concept_?id|concept|test_?code|test_?name|test|lab_?name|analyte|parameter|param|variable|var_?name|measure|feature|attribute|component|loinc(?:_?code)?|npu(?:_?code)?|event_?type)$|^[a-z]{2}(?:testcd|test)$', re.I)
+VALUE_NAME_RE = re.compile(r'(?:^|[_ .\-])(?:value|valuenum|value_?as_?number|value_?as_?string|numeric_?value|num_?value|text_?value|result|result_?value|lab_?result|amount|reading|val)$|^[a-z]{2}(?:orres|stresn|stresc)$', re.I)
+UNIT_NAME_RE = re.compile(r'(?:^|[_ .\-])(?:unit|units|uom|valueuom|unit_?source_?value|unit_?concept_?id|unit_?of_?measure)$|^[a-z]{2}(?:orresu|stresu)$', re.I)
+TIME_NAME_RE = re.compile(r'(?:^|[_ .\-])(?:time|date|datetime|timestamp|charttime|storetime|offset|dtc|dy|day|hour)$', re.I)
+ENTITY_NAME_RE = re.compile(r'(?:^|[_ .\-])(?:subject_?id|patient_?id|person_?id|patientunitstayid|hadm_?id|stay_?id|icustay_?id|usubjid|record_?id|encounter_?id|visit_?occurrence_?id|admission_?id|random\.id|id)$', re.I)
+NUMBERED_RE = re.compile(r'^(.*?[A-Za-z])[_ .\-]?(\d{1,3})$')
+LAYOUT_NAMES = {'long': 'long', 'wide': 'wide', 'wide_numbered': 'wide, numbered column groups', 'no_header': 'no header row', 'list': 'list'}
+
+
+def repeats(column):
+    """Whether a column's values recur (several rows share a value), from its census counts."""
+    if column.get('key_like') or not column.get('values'):
+        return False
+    distinct = column['distinct'] if column.get('distinct') is not None else column.get('distinct_at_least')
+    return bool(distinct) and 2 <= distinct < column['values']
+
+
+def table_layout(columns):
+    """How a table is laid out: 'long' (one row per measurement: a repeating column of variable names or codes with a
+    value column beside it), 'wide' (one column per variable), 'wide_numbered' (wide with groups of numbered columns),
+    'no_header' (most columns unnamed: often a codebook laid out sideways) or 'list' (one or two columns).
+
+    A heuristic over the column names and census statistics; returns the kind, the role of each column that decided it
+    and a sentence for the report."""
+    names = [c['name'] for c in columns]
+    if len(columns) >= 2 and sum(1 for n in names if not n.strip() or re.fullmatch(r'unnamed:? ?\d+', n.strip(), re.I)) * 2 >= len(columns):
+        unnamed = sum(1 for n in names if not n.strip() or re.fullmatch(r'unnamed:? ?\d+', n.strip(), re.I))
+        return {'kind': 'no_header', 'roles': {}, 'text': f"no header row: {fmt_num(unnamed)} of {fmt_num(len(columns))} columns have no name, so the first row is probably not "
+                                                          'a header and this is probably not a data table (often a codebook or key laid out sideways); read its labels as text'}
+    attribute = next((c for c in columns if ATTRIBUTE_NAME_RE.search(c['name']) and repeats(c)), None)
+    values = [c for c in columns if c is not attribute and VALUE_NAME_RE.search(c['name']) and c.get('values')]
+    if attribute and values:
+        values.sort(key=lambda c: c['type'] not in ('number', 'integer'))
+        units = [c for c in columns if UNIT_NAME_RE.search(c['name'])]
+        times = [c for c in columns if c is not attribute and (TIME_NAME_RE.search(c['name']) or c['type'] in ('datetime', 'date'))]
+        entity = next((c for c in columns if c is not attribute and ENTITY_NAME_RE.search(c['name']) and repeats(c)), None)
+        roles = {attribute['name']: 'variable names', **{c['name']: 'values' for c in values}, **{c['name']: 'unit' for c in units}, **{c['name']: 'time' for c in times}}
+        if entity:
+            roles[entity['name']] = 'entity'
+        distinct = fmt_num(attribute['distinct']) if attribute.get('distinct') is not None else '≥ ' + fmt_num(attribute['distinct_at_least'])
+        listed = lambda cs: ', '.join(f"`{cell(c['name'], 40)}`" for c in cs[:3])  # noqa: E731
+        text = (f"long (one row per measurement): the variables are the values of `{cell(attribute['name'], 40)}` ({distinct} distinct), their values are in {listed(values)}"
+                + (f"; unit {listed(units)}" if units else '') + (f"; time {listed(times)}" if times else '') + (f"; several rows per `{cell(entity['name'], 40)}`" if entity else '')
+                + '. The value column pools every variable, so its statistics are not those of any single one')
+        return {'kind': 'long', 'roles': roles, 'text': text}
+    if len(columns) <= 2:
+        return {'kind': 'list', 'roles': {}, 'text': 'list (one or two columns: a code list, lookup or single series)'}
+    groups = {}
+    for n in names:
+        m = NUMBERED_RE.match(n.strip())
+        if m:
+            groups.setdefault(m[1].rstrip('_ .-').lower(), []).append(n)
+    groups = {k: v for k, v in groups.items() if len(v) >= 3}
+    if groups:
+        biggest = sorted(groups.values(), key=len, reverse=True)
+        shown = ', '.join(f"`{cell(g[0], 30)}` … `{cell(g[-1], 30)}` ({len(g)})" for g in biggest[:3]) + (f" and {fmt_num(len(biggest) - 3)} more groups" if len(biggest) > 3 else '')
+        return {'kind': 'wide_numbered', 'roles': {n: 'numbered group' for g in groups.values() for n in g},
+                'text': f"wide (one column per variable) with numbered column groups: {shown}; repeated measurements or several entries per record, side by side"}
+    return {'kind': 'wide', 'roles': {}, 'text': 'wide (one row per record, one column per variable)'}
+
+
+def layout_counts(d, options):
+    """Tables per layout kind for a dataset, as 'n long · m wide …'."""
+    counts = Counter()
+    for entry in families_of(d, options):
+        counts[table_layout(entry['columns'] if entry['family'] else entry['table']['columns'])['kind']] += len(entry['names'])
+    return ' · '.join(f"{fmt_num(n)} {LAYOUT_NAMES[k]}" for k, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def column_row(column, role=None):
     kind = column['type'] if not column.get('declared_type') else f"{column['declared_type']} → {column['type']}"
     distinct = fmt_num(column['distinct']) if column['distinct'] is not None else (f"≥ {fmt_num(column['distinct_at_least'])}" if column.get('distinct_at_least') else '—')
     if column.get('key_like'):
@@ -1145,13 +1223,13 @@ def column_row(column):
     if column.get('time_range'):
         parts.append(f"{column['time_range'][0]} … {column['time_range'][1]}")
     if column.get('labels'):
-        parts.append('labels: ' + ', '.join(f"{cell(l['value'], 32)} ({fmt_num(l['count'])})" for l in column['labels'][:DEFAULTS['rendered_labels']])
+        parts.append('labels: ' + ', '.join(f"{prose(l['value'], 32)} ({fmt_num(l['count'])})" for l in column['labels'][:DEFAULTS['rendered_labels']])
                      + (f" … {fmt_num(len(column['labels']) - DEFAULTS['rendered_labels'])} more in the variable dictionary" if len(column['labels']) > DEFAULTS['rendered_labels'] else ''))
     elif column.get('text_length') and not column.get('key_like'):
         parts.append(f"text length {column['text_length'][0]}–{column['text_length'][1]}")
     values = fmt_num(column['values']) if column['values'] is not None else '—'
     missing = '—' if column['missing'] is None or column['values'] is None else (f"{column['missing'] / (column['values'] + column['missing']):.1%}" if column['values'] + column['missing'] else '—')
-    name = f"`{cell(column['name'], 40)}`" + (f" {cell(column['label'], 60)}" if column.get('label') else '')
+    name = (f"`{cell(column['name'], 40)}`" if column['name'].strip() else '(no name)') + (f" {prose(column['label'], 60)}" if column.get('label') else '') + (f" · {role}" if role else '')
     return f"| {name} | {cell(kind, 48)} | {values} | {missing} | {distinct} | {' · '.join(p for p in parts if p) or '—'} |"
 
 
@@ -1167,9 +1245,9 @@ def table_heading(table):
     if table.get('ragged_rows'):
         note += f" · {fmt_num(table['ragged_rows'])} rows with a different width"
     if table.get('resource_types'):
-        note += ' · resource types: ' + ', '.join(f'{k} ({v})' for k, v in table['resource_types'].items())
+        note += ' · resource types: ' + ', '.join(f'{prose(k, 60)} ({v})' for k, v in table['resource_types'].items())
     if table.get('dataset_label'):
-        note += f" · dataset label: {cell(table['dataset_label'], 60)}"
+        note += f" · dataset label: {prose(table['dataset_label'], 60)}"
     return f"{rows} rows × {len(table['columns'])} columns · {table['format']}{note}"
 
 
@@ -1358,25 +1436,26 @@ def render_dataset(d, options):
     base = dataset_base(d)
     summary = (f"{fmt_num(tables)} tables" + (f" in {fmt_num(len(entries))} entries (tables with the same columns combined)" if len(entries) < tables else '')
                + ', column by column' + (f'; paths are relative to `{cell(base, 100)}/`' if base else ''))
-    out += ['<details>', f"<summary>{summary}</summary>", '']
+    out += [f"**Table layouts:** {layout_counts(d, options)}.", '', '<details>', f"<summary>{summary}</summary>", '']
     for number, entry in enumerate(entries[:options['rendered_tables']], 1):
         heading, line = entry_heading(d, number, entry)
         columns = entry['columns'] if entry['family'] else entry['table']['columns']
-        out += [heading, '', line, '', '| Column | Type | Values | Missing | Distinct | Summary |', '|---|---|---|---|---|---|']
-        out += [column_row(c) for c in columns[:options['rendered_columns']]]
+        layout = table_layout(columns)
+        out += [heading, '', line, '', f"**Layout:** {layout['text']}.", '', '| Column | Type | Values | Missing | Distinct | Summary |', '|---|---|---|---|---|---|']
+        out += [column_row(c, layout['roles'].get(c['name']) if layout['kind'] == 'long' else None) for c in columns[:options['rendered_columns']]]
         if len(columns) > options['rendered_columns']:
             out.append(f"| … | | | | | {fmt_num(len(columns) - options['rendered_columns'])} more columns in the [variable dictionary](DATASET_VARIABLES.csv) |")
         out.append('')
     if len(entries) > options['rendered_tables']:
         out += [f"{fmt_num(len(entries) - options['rendered_tables'])} more entries, listed here without columns (every column is in the [variable dictionary](DATASET_VARIABLES.csv)):", '',
-                '| Table | Rows | Columns | Format |', '|---|---|---|---|']
+                '| Table | Rows | Columns | Format | Layout |', '|---|---|---|---|---|']
         for entry in entries[options['rendered_tables']:]:
             if entry['family']:
                 name, rows, width, fmt = f"{fmt_num(len(entry['names']))} tables like `{cell(entry['names'][0], 100)}`", ('≥ ' if entry['rows_are_lower_bound'] else '') + fmt_num(entry['rows']), len(entry['columns']), entry['format']
             else:
                 t = entry['table']
                 name, rows, width, fmt = f"`{cell(entry['names'][0], 120)}`", ('≥ ' if t.get('rows_are_lower_bound') else '') + fmt_num(t['rows']), len(t['columns']), t['format']
-            out.append(f"| {name} | {rows} | {fmt_num(width)} | {fmt} |")
+            out.append(f"| {name} | {rows} | {fmt_num(width)} | {fmt} | {LAYOUT_NAMES[table_layout(entry['columns'] if entry['family'] else entry['table']['columns'])['kind']]} |")
         out.append('')
     out += ['</details>', '']
     return out
@@ -1430,16 +1509,23 @@ def render(data):
     if data['receipt_files'] is not None and data['lock_files'] and data['lock_files'] != data['receipt_files']:
         out += [f"**The catalogue receipt is older than the holdings:** the acquisition lock lists {fmt_num(data['lock_files'])} files but the receipt knows {fmt_num(data['receipt_files'])}. "
                 'Run `Scripts/validate_dataset_workspace.py` and `Scripts/document_dataset_selection.py`, then this report again, so every acquired file is profiled.', '']
-    out += ['## At a glance', '', '| Dataset | Held files | Tables | Rows | Columns | Other files | Not profiled |', '|---|---|---|---|---|---|---|']
+    out += ['## At a glance', '', '| Dataset | Held files | Tables | Rows | Columns | Table layouts | Other files | Not profiled |', '|---|---|---|---|---|---|---|---|']
     for d in sorted(held, key=lambda x: x['id']):
         others = sum(n for ext, n in d['others'].items() if ext != ARCHIVE_METADATA)
-        out.append(f"| [{d['id']}](#{d['id'].lower()}) | {fmt_num(d['held_files'])} ({fmt_bytes(d['held_bytes'])}) | {fmt_num(d['tables'])} | {fmt_num(d['rows'])} | {fmt_num(d['columns'])} | {fmt_num(others)} | {fmt_num(len(d['skipped']))} |")
+        layouts = layout_counts(d, options) if d['profiled'] else ''
+        out.append(f"| [{d['id']}](#{d['id'].lower()}) | {fmt_num(d['held_files'])} ({fmt_bytes(d['held_bytes'])}) | {fmt_num(d['tables'])} | {fmt_num(d['rows'])} | {fmt_num(d['columns'])} | {layouts or '—'} | {fmt_num(others)} | {fmt_num(len(d['skipped']))} |")
     out += ['', f"Not held ({fmt_num(len(not_held))}): " + ', '.join(f"[{d['id']}](#{d['id'].lower()})" for d in sorted(not_held, key=lambda x: x['id'])) + '. See [Before you apply](#before-you-apply-what-is-known-about-the-datasets-that-are-not-held).' if not_held else '', '']
     out += ['## How to read the tables', '',
             '- **Type** is inferred from the values (integer, number, date, datetime, boolean, text; mixed when kinds disagree) or, for ARFF and SQLite, the declared type followed by the inferred one.',
             '- **Values** and **Missing** count non-missing cells and the share of missing cells (empty, NA, NULL, ?). **Distinct** counts different values; (unique) marks a column whose values never repeat, a candidate key.',
             '- **Summary** gives min, median, mean and max for numbers (≈ marks a median estimated from a sample), the first and last timestamp for dates, the labels and counts of low-cardinality columns, and the text length range otherwise.',
             '- **Composition** lists, per folder of the release, the files, their size, the tables found in them and the main file formats.',
+            '- **Layout** is inferred from the column names and the statistics, never from a new read of the file. **Long** (one row per measurement): a column of repeating '
+            'variable names or codes (item, itemid, code, concept_id, test, parameter, variable, analyte, labname, an SDTM --TESTCD and the like) has a value column beside it '
+            '(value, valuenum, value_as_number, numeric_value, result, an SDTM --ORRES or --STRESN); the variables are then the values of that column, and the value column\'s '
+            'statistics pool every variable. **Wide**: one column per variable, with **numbered column groups** noted (hb_1, hb_2, …: repeated measurements or several entries '
+            'per record side by side). **No header row**: most columns have no name, often a codebook or key laid out sideways rather than data. **List**: one or two columns. '
+            'It is a heuristic: check the columns it names.',
             '- Tables with the same columns and format (per-patient files, yearly or per-site extracts) are combined into one entry when there are at least three: rows and missing values add up, '
             'ranges widen, labels merge when each table lists all its values, and distinct counts are otherwise the largest per table (≥).',
             '- Excel workbooks are read sheet by sheet with the first non-empty row as the header and Excel dates converted; Parquet files are described from their footer (schema, row count, '
@@ -1459,7 +1545,7 @@ def render(data):
     return '\n'.join(out)
 
 
-DICTIONARY_FIELDS = ['dataset_id', 'dataset_name', 'dataset_folder', 'table', 'tables_with_these_columns', 'distinct_file_names', 'format', 'rows', 'column', 'label', 'declared_type', 'type', 'values', 'missing',
+DICTIONARY_FIELDS = ['dataset_id', 'dataset_name', 'dataset_folder', 'table', 'tables_with_these_columns', 'distinct_file_names', 'format', 'rows', 'table_layout', 'column', 'layout_role', 'label', 'declared_type', 'type', 'values', 'missing',
                      'missing_share', 'distinct', 'unique', 'min', 'median', 'mean', 'max', 'first_time', 'last_time', 'labels', 'text_length']
 
 
@@ -1486,11 +1572,12 @@ def write_dictionary(data, target):
                 else:
                     t = entry['table']
                     name, count, fmt, rows, columns, distinct = entry['names'][0], 1, t['format'], t['rows'], t['columns'], 1
+                layout = table_layout(columns)
                 for c in columns:
                     numeric, present = c.get('numeric') or {}, c['values']
                     writer.writerow({'dataset_id': d['id'], 'dataset_name': spreadsheet_safe(d['name']), 'dataset_folder': spreadsheet_safe(base), 'table': spreadsheet_safe(name),
                                      'tables_with_these_columns': count, 'distinct_file_names': distinct, 'format': fmt,
-                                     'rows': rows, 'column': spreadsheet_safe(c['name']), 'label': spreadsheet_safe(c.get('label')), 'declared_type': spreadsheet_safe(c.get('declared_type')),
+                                     'rows': rows, 'table_layout': layout['kind'], 'column': spreadsheet_safe(c['name']), 'layout_role': layout['roles'].get(c['name'], '') if layout['kind'] == 'long' else '', 'label': spreadsheet_safe(c.get('label')), 'declared_type': spreadsheet_safe(c.get('declared_type')),
                                      'type': c['type'], 'values': '' if present is None else present, 'missing': '' if c['missing'] is None else c['missing'],
                                      'missing_share': f"{c['missing'] / (present + c['missing']):.4f}" if present is not None and c['missing'] is not None and present + c['missing'] else '',
                                      'distinct': c['distinct'] if c['distinct'] is not None else (f">={c['distinct_at_least']}" if c.get('distinct_at_least') else ''),
@@ -1520,9 +1607,12 @@ def write_document(root=ROOT, options=None, only=None, reuse=True):
     structure.write_text(json.dumps(record, indent=1, ensure_ascii=False, default=str) + '\n')
     variables = write_dictionary(data, root / 'docs/DATASET_VARIABLES.csv')
     shutil.copyfile(variables, folder / 'variables.csv')
+    from build_dataset_browser import structure_export  # the site's renderer, so the one-file copy matches the Data structure page
+    export = root / 'docs/DATASET_STRUCTURE.html'  # the same report as one self-contained file, for sending beside the dictionary
+    export.write_text(structure_export(doc, siblings={'DATASET_VARIABLES.csv': 'DATASET_VARIABLES.csv'}, study=workspace_study_id(root)) + '\n')
     (root / 'data/interim/dataset_structure/latest.json').write_text(json.dumps(
         {'run': stamp, 'structure': str(structure.relative_to(root)), 'structure_sha256': digest(structure), 'document': 'docs/DATASET_STRUCTURE.md', 'document_sha256': digest(doc),
-         'variables': 'docs/DATASET_VARIABLES.csv', 'variables_sha256': digest(variables),
+         'variables': 'docs/DATASET_VARIABLES.csv', 'variables_sha256': digest(variables), 'html': 'docs/DATASET_STRUCTURE.html', 'html_sha256': digest(export),
          'summary': {'datasets': len(data['datasets']), 'held': sum(1 for d in data['datasets'] if d['held_files']), 'tables': sum(d['tables'] for d in data['datasets']),
                      'rows': sum(d['rows'] for d in data['datasets']), 'columns': sum(d['columns'] for d in data['datasets']), 'not_profiled': sum(len(d['skipped']) for d in data['datasets'])}},
         indent=2) + '\n')
@@ -1534,7 +1624,7 @@ def main(argv=None, root=ROOT):
     parser.add_argument('--datasets', help='Comma-separated catalogue IDs to profile; the others are listed from the receipt only')
     parser.add_argument('--max-rows', type=int, default=DEFAULTS['max_rows'], help='Rows per table used for the column statistics (default %(default)s)')
     parser.add_argument('--max-tables', type=int, default=DEFAULTS['max_tables'], help='Tables profiled per dataset (default %(default)s)')
-    parser.add_argument('--report', action='store_true', help='Also save a dated tracked copy under reports/ and register it with the study')
+    parser.add_argument('--report', action='store_true', help='Also save a dated tracked copy under reports/ and register it with the study, with the dated variable dictionary and the report as one self-contained HTML file for sharing')
     parser.add_argument('--no-reuse', action='store_true', help='Profile every held file again instead of reusing this or a neighbouring study’s census for files whose bytes, options and code are unchanged')
     args = parser.parse_args(argv)
     only = {x.strip() for x in args.datasets.split(',') if x.strip()} if args.datasets else None
@@ -1548,9 +1638,14 @@ def main(argv=None, root=ROOT):
         dated = root / 'reports' / f'dataset-variables-{date.today().isoformat()}.csv'
         dated.parent.mkdir(exist_ok=True)
         shutil.copyfile(root / 'docs/DATASET_VARIABLES.csv', dated)
-        result['report'] = str(save_report(root, doc, title='Data structure: tables, columns, types and statistics', stem='dataset-structure', runs_dir='structure_reports',
-                                           links={'DATASET_VARIABLES.csv': dated.name}))
+        saved = save_report(root, doc, title='Data structure: tables, columns, types and statistics', stem='dataset-structure', runs_dir='structure_reports',
+                            links={'DATASET_VARIABLES.csv': dated.name})
+        result['report'] = str(saved)
         result['variables'] = str(dated)
+        from build_dataset_browser import structure_export  # the site's renderer, so the file matches the Data structure page
+        export = Path(saved).with_suffix('.html')  # one self-contained file for a collaborator; the dated dictionary travels beside it
+        export.write_text(structure_export(saved, siblings={dated.name: dated.name}, variables_name=dated.name, study=workspace_study_id(root)) + '\n')
+        result['html'] = str(export)
     print(json.dumps(result))
     return result
 

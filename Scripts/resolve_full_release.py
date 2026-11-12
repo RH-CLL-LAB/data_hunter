@@ -25,6 +25,11 @@ A release the user obtained themselves (after credentialing, an agreement, or fr
 enters through `--import-from ID=FOLDER`: the folder stands in for the provider manifest, identities come from the
 SHA256SUMS or MD5SUMS file the download brought along (without one the files need the missing-checksum acknowledgement),
 and the files are copied in under the same approval, identity, size and licence gates as a download.
+
+Exact files of a provider without an automated route, read by hand from its own pages, enter through
+`--file-list ID=FILE`: a JSON list of the provider's download URLs (with the provider's sizes and checksums where it
+publishes them) stands in for the provider manifest. The files keep their real URLs and are downloaded and checked like
+any resolved file; the list and the provider pages it names are kept as evidence.
 """
 from __future__ import annotations
 
@@ -47,7 +52,7 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from public_resources import contained, digest, write_json  # noqa: E402
+from public_resources import contained, digest, write_json, write_reviews  # noqa: E402
 import acquire_research_resources as acquisition  # noqa: E402
 import run_download_agent as agent  # noqa: E402
 from review_quarantine import refresh_dataset_entries  # noqa: E402
@@ -438,6 +443,91 @@ def resolve_folder(d, folder, evidence):
             'checksum_file_entries': len(identities), 'files_without_provider_identity': sum(1 for rel in present if rel not in identities)}
 
 
+FILE_LIST_LIMIT = 5000      # files in one hand-prepared list
+FILE_LIST_PAGES = 100       # provider pages one list may cite
+IDENTITY_FORMATS = {'md5': ('provider_md5', 32), 'sha256': ('provider_sha256', 64), 'git_blob_sha1': ('git_blob_sha1', 40)}
+
+
+def resolve_file_list(d, path, evidence):
+    """Exact provider files a person listed by hand, for a provider without an automated route.
+
+    The list is JSON: `dataset_id`, a `release` label, `prepared_from` (the provider pages the list was read from) and
+    `files`, each with the provider's https `url`, the `path` it is kept under and, where the provider publishes them,
+    `bytes` and one of `md5`, `sha256` or `git_blob_sha1`; optionally `left_out`, sources of the release the list cannot
+    cover (a member-only file, say), each with its `source` URL and `reason`, which keep the dataset partial. It stands in
+    for the provider manifest: the list is kept as
+    evidence and the `prepared_from` pages are fetched again and kept beside it, so the record shows what it was read
+    from. Each file keeps its real URL and goes through the same gates as any resolved file: a listed checksum must
+    match the downloaded bytes, a size the list omits comes from the provider's HEAD response, and a file the provider
+    publishes no checksum for needs the missing-checksum acknowledgement.
+    """
+    path = Path(path)
+    name = f'hand-prepared file list {path.name}'
+    try:
+        listing = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {'blocked': 'file_list_unreadable', 'release': name}
+    if not isinstance(listing, dict) or listing.get('dataset_id') != d['id']:
+        return {'blocked': 'file_list_names_another_dataset', 'release': name}
+    rows, pages = listing.get('files'), listing.get('prepared_from')
+    if not isinstance(rows, list) or not 0 < len(rows) <= FILE_LIST_LIMIT:
+        return {'blocked': 'file_list_empty_or_too_long', 'release': name}
+    if not isinstance(pages, list) or not 0 < len(pages) <= FILE_LIST_PAGES or any(urlsplit(str(u)).scheme != 'https' for u in pages):
+        return {'blocked': 'file_list_needs_the_https_provider_pages_it_was_prepared_from', 'release': name}
+    files, seen = [], set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return {'blocked': 'file_list_entry_is_not_an_object', 'release': name}
+        url, rel = str(row.get('url', '')), str(row.get('path', ''))
+        try:
+            contained(Path('/release'), rel)
+        except ValueError:
+            return {'blocked': 'file_list_unsafe_path: ' + rel[:120], 'release': name}
+        if urlsplit(url).scheme != 'https' or not urlsplit(url).netloc:
+            return {'blocked': 'file_list_url_must_be_https: ' + url[:120], 'release': name}
+        if rel in seen or url in seen:
+            return {'blocked': 'file_list_duplicate_path_or_url: ' + rel[:120], 'release': name}
+        seen.update({rel, url})
+        identity = {}
+        for field, (key, length) in IDENTITY_FORMATS.items():
+            if row.get(field) is not None:
+                if not re.fullmatch(r'[0-9a-f]{%d}' % length, str(row[field])):
+                    return {'blocked': f'file_list_malformed_{field}: ' + rel[:120], 'release': name}
+                identity[key] = row[field]
+        size = row.get('bytes')
+        if size is not None and (type(size) is not int or size < 0):
+            return {'blocked': 'file_list_malformed_bytes: ' + rel[:120], 'release': name}
+        files.append(file_entry(rel, url, size, **identity))
+    left_out = listing.get('left_out') or []
+    if not isinstance(left_out, list) or any(not isinstance(x, dict) or urlsplit(str(x.get('source', ''))).scheme != 'https' or not x.get('reason') for x in left_out):
+        return {'blocked': 'file_list_left_out_needs_https_source_and_reason', 'release': name}
+    body = path.read_bytes()  # evidence is named by its content, so a list edited later the same day is kept beside the first
+    evidence.append((f"file_list_{slug(d['id'])}_{hashlib.sha256(body).hexdigest()[:12]}_{path.name}", body, 'file://' + str(path.resolve())))
+    for page in pages:
+        status, _, _, body = fetch(page)
+        if status != 200 or not body:
+            return {'blocked': f'file_list_source_page_unavailable_http_{status}: ' + page[:120], 'release': name}
+        kind = '.json' if body.lstrip()[:1] in (b'{', b'[') else '.html' if body.lstrip()[:1] == b'<' else '.txt'
+        evidence.append((f"file_list_{slug(d['id'])}_source_{hashlib.sha256(body).hexdigest()[:12]}_{slug(urlsplit(page).path)[-60:]}{kind}", body, page))
+    sizes = head_sizes([f['url'] for f in files if f['bytes'] is None])
+    files = [{**f, 'bytes': sizes.get(f['url'])} if f['bytes'] is None else f for f in files]
+    return {'release': str(listing.get('release') or name), 'manifest': f'{path.name}: {len(files)} files listed by hand from {len(pages)} provider pages',
+            'files': files, 'folder': slug(d['id']), 'unsupported_urls': [x['source'] for x in left_out], 'left_out': left_out, 'components': None, 'licence_label': None, 'file_list': str(path.resolve())}
+
+
+def file_lists_for(spec, file_lists):
+    """Datasets whose exact files a person listed by hand: id -> list file, checked before any provider is contacted."""
+    lists = {}
+    for dataset_id, path in (file_lists or {}).items():
+        if dataset_id not in spec['dataset_ids']:
+            raise ValueError('file_list_dataset_not_in_instructions: ' + dataset_id)
+        path = Path(path).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError('file_list_missing: ' + str(path))
+        lists[dataset_id] = path
+    return lists
+
+
 def import_folders(root, spec, import_from):
     """Datasets whose release the user obtained themselves: id -> folder, checked before any provider is contacted."""
     folders = {}
@@ -514,7 +604,7 @@ def withdraw_unheld_jobs(root, dataset_id):
     entry['full_release'] = {**entry.get('full_release', {}), 'withdrawn_unheld_jobs': len(gone), 'withdrawn_on': date.today().isoformat(), 'complete': False}
     write_json(root / 'configs/research_resources.json', manifest)
     write_json(root / 'configs/resource_scope.json', scope)
-    write_json(reviews_path, reviews)
+    write_reviews(reviews_path, reviews)
     return sorted(gone)
 
 
@@ -687,7 +777,7 @@ def register(root, d, resolution, plan, evidence_items, licence_evidence, run_na
     if jobs:  # recording a release held under another entry's jobs registers nothing new: the job manifest the acquisition report is bound to stays untouched
         write_json(root / 'configs/research_resources.json', manifest)
         write_json(root / 'configs/resource_scope.json', scope)
-    write_json(root / 'configs/dataset_download_reviews.json', reviews)
+    write_reviews(root / 'configs/dataset_download_reviews.json', reviews)  # each release's evidence list is stored once, not per file
     if new_assets:
         write_json(root / 'configs/data_license_assets.json', assets)
     return {'jobs': len(jobs), 'approvals': len(approvals), 'assets': len(new_assets)}
@@ -710,7 +800,7 @@ def confirm_complete(root, completed, run_name):
                                      'unacknowledged_files': plan.get('unacknowledged_files', 0), 'unsupported_sources': plan.get('unsupported_urls', []), 'unresolved_sources': [], 'not_held_elsewhere_files': 0, 'complete': True,
                                      'confirmed_complete': date.today().isoformat(), 'resolver_run': run_name}
             entry['minimal_selection'] = 'All files (complete provider release)'
-    write_json(path, reviews)
+    write_reviews(path, reviews)
 
 
 # -------------------------------------------------------------------------------------------------- execution
@@ -807,7 +897,7 @@ def reuse_workspaces(root, names):
     return found
 
 
-def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, workers=4, only=None, reuse_from=None, import_from=None, reuse_only=False):
+def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, workers=4, only=None, reuse_from=None, import_from=None, reuse_only=False, file_lists=None):
     root = Path(root).resolve()
     spec = agent.read_instructions(instructions_path)
     receipt = read(root / 'data/interim/dataset_selection/latest.json')
@@ -852,8 +942,11 @@ def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, w
     if reuse_only and not reuse:
         raise ValueError('reuse_only_needs_another_study_that_holds_files')
     imports = import_folders(root, spec, import_from)  # releases the user obtained themselves: their folders stand in for the provider
+    lists = file_lists_for(spec, file_lists)  # exact provider files listed by hand: the list stands in for the provider manifest
+    if set(imports) & set(lists):
+        raise ValueError('dataset_given_both_an_import_folder_and_a_file_list: ' + ', '.join(sorted(set(imports) & set(lists))))
     import_sources = {}
-    journal('run_started', {'reuse_only': reuse_only, 'dataset_ids': spec['dataset_ids'], 'only': sorted(only) if only else None, 'reuse_from': [p.name for p in reuse_paths], 'import_from': {i: str(f) for i, f in imports.items()}, 'reuse_held_files': spec.get('reuse_held_files') is True, 'license_mode': spec['license_mode'], 'study_id': study_id, 'register': register_jobs, 'execute': execute_jobs})
+    journal('run_started', {'reuse_only': reuse_only, 'dataset_ids': spec['dataset_ids'], 'only': sorted(only) if only else None, 'reuse_from': [p.name for p in reuse_paths], 'import_from': {i: str(f) for i, f in imports.items()}, 'file_lists': {i: str(f) for i, f in lists.items()}, 'reuse_held_files': spec.get('reuse_held_files') is True, 'license_mode': spec['license_mode'], 'study_id': study_id, 'register': register_jobs, 'execute': execute_jobs})
     held_bytes, reserved = committed_bytes(root, spec['dataset_ids'])
     outcomes, ready, completed, total_budget = [], {}, {}, held_bytes + sum(reserved.values())
     for dataset_id in selected:
@@ -867,6 +960,8 @@ def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, w
             resolution = {'blocked': 'no_public_access_route', 'release': None}
         elif 'registration' in route and 'no_registration' not in route:
             resolution = {'blocked': 'blocked_access_' + route, 'release': None}
+        elif dataset_id in lists:  # exact files of an open provider without an automated route, listed by hand from its pages
+            resolution = resolve_file_list(d, lists[dataset_id], evidence)
         else:
             targets, unsupported = detect_all(d.get('source_urls', []))
             resolution = resolve_all(targets, unsupported, evidence) if targets else {'blocked': 'unsupported_provider_manual_route', 'release': None, 'unsupported_urls': unsupported}
@@ -893,7 +988,7 @@ def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, w
                    'release_files': plan.get('release_files'), 'previously_held': plan.get('held'), 'new_jobs': len(plan['jobs']), 'unbound_files': plan.get('unbound_files', 0), 'unacknowledged_files': plan.get('unacknowledged_files', 0), 'rights_unresolved_files': plan.get('rights_unresolved_files', 0), 'unknown_size_files': plan.get('unknown_size_files', 0),
                    'unbound_sample': plan.get('unbound_sample', []), 'package_budget_bytes': plan.get('package_budget'), 'selection_committed_bytes_before': total_budget, 'withdrawn_jobs': withdrawn, 'expected_bytes': sum(j.get('expected_bytes', 0) for j in plan['jobs']),
                    'technical_risks': plan.get('risks'), 'unaccepted_risks': plan.get('unaccepted'), 'license_bindings': plan.get('bindings'), 'complete_release_registrable': plan.get('complete_release_registrable'),
-                   'imported_from': resolution.get('imported_from'), 'missing_files': resolution.get('missing_files'), 'evidence': evidence_items}
+                   'imported_from': resolution.get('imported_from'), 'file_list': resolution.get('file_list'), 'missing_files': resolution.get('missing_files'), 'evidence': evidence_items}
         if plan['outcome'] in {'ready', 'ready_partial'}:
             total_budget += plan['package_budget']
             if register_jobs:
@@ -943,14 +1038,21 @@ def main(argv=None):
     parser.add_argument('--reuse-only', action='store_true', help='Copy only the files other study workspaces hold (all of them unless --reuse-from-study names some) and download nothing; the rest of each release stays unregistered and the dataset partial')
     parser.add_argument('--reuse-from-study', nargs='+', metavar='STUDY', help='Copy files another study workspace already holds and verified (study id under studies/ or a workspace path) instead of downloading them; identity checks and this study’s permission gates still apply')
     parser.add_argument('--import-from', nargs='+', metavar='ID=FOLDER', help='A release you obtained yourself (after credentialing, an agreement or from a provider without an automated route): the folder stands in for the provider manifest; keep the provider’s SHA256SUMS or MD5SUMS file in it so the copy is verified against the provider’s hashes; the same approval, size and licence gates apply')
+    parser.add_argument('--file-list', nargs='+', metavar='ID=FILE', help='Exact files of a provider without an automated route, listed by hand from its own pages (JSON: dataset_id, release, prepared_from, files with url, path and the provider’s bytes and md5, sha256 or git_blob_sha1 where published): the list stands in for the provider manifest, the files keep their real URLs and are downloaded under the same gates')
     args = parser.parse_args(argv)
+    lists = {}
+    for item in args.file_list or []:
+        if '=' not in item:
+            parser.error('--file-list takes ID=FILE')
+        dataset_id, path = item.split('=', 1)
+        lists[dataset_id] = path
     imports = {}
     for item in args.import_from or []:
         if '=' not in item:
             parser.error('--import-from takes ID=FOLDER')
         dataset_id, folder = item.split('=', 1)
         imports[dataset_id] = folder
-    return run(args.instructions, register_jobs=args.register or args.execute, execute_jobs=args.execute, workers=args.workers, only=args.datasets, reuse_from=args.reuse_from_study, import_from=imports or None, reuse_only=args.reuse_only)
+    return run(args.instructions, register_jobs=args.register or args.execute, execute_jobs=args.execute, workers=args.workers, only=args.datasets, reuse_from=args.reuse_from_study, import_from=imports or None, reuse_only=args.reuse_only, file_lists=lists or None)
 
 
 if __name__ == '__main__':

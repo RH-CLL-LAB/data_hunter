@@ -24,6 +24,30 @@ class StudyBrowserTests(unittest.TestCase):
         payload=re.search(r'<script[^>]+>(.*?)</script>',html,re.S).group(1)
         self.assertEqual(json.loads(payload)['studies'][0]['question'],question)
 
+    def test_escaped_markdown_stays_text_and_links_still_render(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source=Path(temporary)/'DATASET_STRUCTURE.md'
+            source.write_text('| Column | Notes |\n|---|---|\n| `use` | labels: .scopes\\[Role\\](classCode=IDENT) (3), a\\\\\\|b (1), \\*\\*x\\*\\* (2) |\n\nSee [the guide](https://example.org/guide).\n')
+            html=browser.markdown(source,browser.OUT/'structure.html')
+        self.assertIn('.scopes[Role](classCode=IDENT) (3)',html)
+        self.assertIn('a\\|b (1)',html,'an escaped backslash and an escaped pipe both stay text in a table cell')
+        self.assertIn('**x** (2)',html)
+        self.assertEqual(re.findall(r'<a [^>]*href="([^"]+)"',html),['https://example.org/guide'],'only the real link is a link')
+
+    def test_standalone_export_is_one_file_with_its_own_contents_and_links(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source=Path(temporary)/'report.md'
+            source.write_text('# Title\n\n## Held datasets\n\n### DEMO — Demo set\n\n<a id="demo"></a>\n\nSee [Dataset page](DATASET_SELECTION.md#demo), [the dictionary](vars.csv), [Licensing](DATA_LICENSES_AND_AI_USE.md), [web](https://example.org/x) and [back](#held-datasets).\n\n'
+                              '<details>\n<summary>1 table</summary>\n\n| Column | Type |\n|---|---|\n| `a` | integer |\n\n</details>\n')
+            html=browser.standalone_document(source,'Report','Study demo','Notice <strong>here</strong>.',siblings={'vars.csv':'vars.csv'})
+        self.assertNotRegex(html,r'<link |\ssrc=|@import|url\(')
+        self.assertEqual(re.findall(r'<a [^>]*href="([^"]+)"',html.split('<main>')[1]),['vars.csv','https://example.org/x','#held-datasets'])
+        self.assertEqual(html.count('<span class="offsite"'),2,'site pages become text')
+        self.assertIn('<li class="toc3" data-filter="demo — demo set"><a href="#demo--demo-set" title="Demo set">DEMO</a></li>',html)
+        self.assertIn('id="demo--demo-set"',html)
+        self.assertIn('<details>',html);self.assertIn('Notice <strong>here</strong>.',html)
+        self.assertIn('Show all datasets',html);self.assertIn('.prose.single>section.ds.current{display:block}',html,'one dataset at a time when its link is opened')
+
     def test_only_explicitly_public_notices_are_attached_to_the_site(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary).resolve();out=root/'docs/dataset-browser';out.mkdir(parents=True)

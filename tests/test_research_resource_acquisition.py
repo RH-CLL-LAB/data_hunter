@@ -307,6 +307,25 @@ class DownloadReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'metadata_missing_or_changed'):
             module.require_download_review(self.item,{})
 
+    def test_shared_evidence_set_must_still_hash_to_its_name(self):
+        import public_resources  # on the path once the acquisition module is loaded
+        self.approve();p=self.root/'configs/dataset_download_reviews.json'
+        public_resources.write_reviews(p,json.loads(p.read_text()))
+        shared=json.loads(p.read_text());key=shared['approved_artifacts'][0]['metadata_evidence_set']
+        self.assertNotIn('metadata_evidence',shared['approved_artifacts'][0])
+        self.assertEqual(list(shared['evidence_sets']),[key])
+        module.require_download_review(self.item,{})
+        (self.root/'dictionary.txt').write_text('different schema')
+        with self.assertRaisesRegex(ValueError,'metadata_missing_or_changed'):
+            module.require_download_review(self.item,{})
+        evidence=self.root/'other.txt';evidence.write_text('different schema')
+        shared['evidence_sets'][key]=[{'path':'other.txt','sha256':hashlib.sha256(evidence.read_bytes()).hexdigest()}];p.write_text(json.dumps(shared))
+        with self.assertRaisesRegex(ValueError,'evidence_set_missing_or_changed'):
+            module.require_download_review(self.item,{})
+        del shared['evidence_sets'][key];p.write_text(json.dumps(shared))
+        with self.assertRaisesRegex(ValueError,'evidence_set_missing_or_changed'):
+            module.require_download_review(self.item,{})
+
     def test_review_registry_is_parsed_once_until_its_bytes_change(self):
         self.approve();p=self.root/'configs/dataset_download_reviews.json'
         first=module.require_download_review(self.item,{})

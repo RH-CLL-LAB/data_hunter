@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 from pathlib import Path
 import sqlite3
 import struct
@@ -108,6 +109,40 @@ class StructureReportTests(unittest.TestCase):
         self.assertEqual(gated['family_held'], ['HELD_DEMO'])
         self.assertEqual(gated['documentation'], ['data/raw/notices/gated_project.html'])
         self.assertEqual(gated['terms_sources'], ['https://provider.example/full/view-license/'])
+
+    def test_table_layout_is_inferred_from_names_and_statistics(self):
+        def col(name, kind='text', values=100, distinct=10, key=False, at_least=None):
+            return {'name': name, 'type': kind, 'values': values, 'missing': 0, 'distinct': distinct, 'distinct_at_least': at_least, 'key_like': key}
+        mimic = [col('subject_id', 'integer', distinct=5), col('charttime', 'datetime', distinct=90), col('itemid', 'integer', distinct=12), col('value'), col('valuenum', 'number', distinct=80), col('valueuom', distinct=6)]
+        layout = module.table_layout(mimic)
+        self.assertEqual(layout['kind'], 'long')
+        self.assertEqual(layout['roles'], {'itemid': 'variable names', 'value': 'values', 'valuenum': 'values', 'valueuom': 'unit', 'charttime': 'time', 'subject_id': 'entity'})
+        self.assertIn('the values of `itemid` (12 distinct), their values are in `valuenum`, `value`', layout['text'], 'a numeric value column is named first')
+        sdtm = [col('USUBJID', distinct=8), col('LBTESTCD', distinct=20), col('LBORRES', distinct=70), col('LBORRESU', distinct=9), col('LBDTC', 'datetime')]
+        self.assertEqual(module.table_layout(sdtm)['roles']['LBTESTCD'], 'variable names')
+        family = [col('Time', distinct=None, at_least=48), col('Parameter', distinct=None, at_least=37), col('Value', 'number', distinct=None, at_least=60)]
+        self.assertEqual(module.table_layout(family)['kind'], 'long', 'merged per-patient files keep only a lower bound of distinct values')
+        self.assertEqual(module.table_layout([col('code', key=True, distinct=100), col('value'), col('system')])['kind'], 'wide', 'a lookup whose codes never repeat is not long')
+        self.assertEqual(module.table_layout([col('patient_id', key=True, distinct=100), col('age', 'integer'), col('sex', distinct=2)])['kind'], 'wide')
+        numbered = module.table_layout([col('id', key=True, distinct=100)] + [col(f'hb_{i}', 'number') for i in range(1, 7)] + [col(f'crp{i}', 'number') for i in range(1, 4)])
+        self.assertEqual(numbered['kind'], 'wide_numbered')
+        self.assertIn('`hb_1` … `hb_6` (6)', numbered['text'])
+        sideways = module.table_layout([col('Key for file: data.Patients')] + [col('') for _ in range(16)])
+        self.assertEqual(sideways['kind'], 'no_header')
+        self.assertIn('16 of 17 columns have no name', sideways['text'])
+        self.assertEqual(module.table_layout([col('code', distinct=5), col('label')])['kind'], 'list')
+        self.assertIn('| (no name) |', module.column_row(col('')), 'an empty header is named, not shown as an empty code span')
+        self.assertIn('`itemid` · variable names', module.column_row(col('itemid'), 'variable names'))
+
+    def test_text_read_from_files_cannot_become_markdown_links(self):
+        column = {'name': 'Mapping: RIM', 'label': 'see [note](x)', 'type': 'text', 'values': 3, 'missing': 0, 'distinct': 2,
+                  'labels': [{'value': '.scopes[Role](classCode=IDENT)', 'count': 2}, {'value': 'a|b*', 'count': 1}]}
+        row = module.column_row(column)
+        self.assertIn(r'.scopes\[Role\](classCode=IDENT) (2)', row)
+        self.assertIn(r'a\|b\* (1)', row)
+        self.assertIn(r'see \[note\](x)', row)
+        self.assertNotRegex(row, r'(?<!\\)\[[^\]]*(?<!\\)\]\(', 'no unescaped [text](target) remains')
+        self.assertIn(r'dataset label: x\[1\](y)', module.table_heading({'rows': 1, 'columns': [], 'format': 'SAS transport', 'profiled_rows': 1, 'dataset_label': 'x[1](y)'}))
 
     def test_column_types_statistics_and_labels_are_inferred_without_copying_cells(self):
         data = module.collect(self.root)
@@ -231,6 +266,29 @@ class StructureReportTests(unittest.TestCase):
         (neighbour / json.loads((neighbour / 'data/interim/dataset_structure/latest.json').read_text())['structure']).write_text(json.dumps(record))
         shutil.rmtree(own)
         self.assertEqual(module.write_document(self.root)[1]['reused_artifacts'], 0, 'a census made by other profiling code is never reused')
+
+    def test_report_mode_also_saves_one_self_contained_html_file(self):
+        sys.path.insert(0, str(CODE_ROOT / 'Scripts'))
+        import register_research_study
+        with patch.object(register_research_study, 'set_active', lambda *_: None):
+            result = module.main(['--report'], root=self.root)
+        today = date.today().isoformat()
+        html_path = Path(result['html'])
+        self.assertEqual((html_path.name, html_path.parent), (f'dataset-structure-{today}.html', self.root / 'reports'))
+        html = html_path.read_text()
+        self.assertTrue(html.startswith('<!doctype html>') and '<style>' in html and '<script>' in html)
+        self.assertNotRegex(html, r'<link |\ssrc=|@import|url\(', 'no stylesheet, script, image or font is loaded from anywhere')
+        self.assertIn(f'href="dataset-variables-{today}.csv"', html, 'the dated dictionary saved beside it stays linked')
+        self.assertNotIn('DATASET_SELECTION.md', html.split('<main>')[1].split('</main>')[0].replace('class="offsite"', ''), 'links into the site become text')
+        self.assertIn('<span class="offsite"', html)
+        self.assertIn('data-filter="held_demo', html, 'the contents list names every dataset section')
+        self.assertIn('Data-derived content', html)
+        ids = set(re.findall(r'\sid="([^"]+)"', html))
+        missing = [h for h in re.findall(r'href="#([^"]+)"', html) if h not in ids]
+        self.assertEqual(missing, [], 'every in-document link has its anchor')
+        current = (self.root / 'docs/DATASET_STRUCTURE.html').read_text()
+        self.assertIn('href="DATASET_VARIABLES.csv"', current, 'the census writes the one-file report beside its Markdown and dictionary')
+        self.assertIn('developed by Nikola Tom', current)
 
     def test_dated_report_is_tracked_and_registered_with_the_study(self):
         doc, data = module.write_document(self.root)
@@ -507,7 +565,7 @@ class ReaderTests(unittest.TestCase):
         text = module.write_document(self.root)[0].read_text()
         self.assertIn('2 archive metadata entries (macOS `__MACOSX/` resource forks, `.DS_Store`) are not data and were ignored.', text)
         self.assertIn('| [HELD](#held) | 1 (', text)
-        self.assertTrue(text.split('| [HELD](#held) | 1 (')[1].split('\n')[0].endswith('| 1 | 5,000 | 2 | 0 | 1 |'), 'metadata entries are not counted as other files')
+        self.assertTrue(text.split('| [HELD](#held) | 1 (')[1].split('\n')[0].endswith('| 1 | 5,000 | 2 | 1 list | 0 | 1 |'), 'metadata entries are not counted as other files')
 
     def test_a_profile_cut_by_the_table_budget_is_never_reused(self):
         archive = io.BytesIO()

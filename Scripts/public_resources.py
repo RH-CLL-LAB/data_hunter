@@ -80,6 +80,54 @@ def write_json(path, value):
     temp.replace(path)
 
 
+def evidence_set_key(evidence):
+    """The content address of a metadata evidence list: the SHA-256 of its canonical JSON."""
+    return hashlib.sha256(json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def approval_evidence(reviews, approval):
+    """The metadata evidence an exact-artifact approval rests on: its own list, or the shared set it names.
+
+    A shared set counts only while its content still hashes to its name, so editing one set can never silently change
+    what thousands of approvals rest on.
+    """
+    if "metadata_evidence_set" not in approval:
+        return approval.get("metadata_evidence")
+    key = approval["metadata_evidence_set"]
+    evidence = reviews.get("evidence_sets", {}).get(key)
+    if evidence is None or evidence_set_key(evidence) != key:
+        raise ValueError("download_review_evidence_set_missing_or_changed: " + str(approval.get("id")))
+    return evidence
+
+
+def share_evidence(reviews):
+    """Store each distinct evidence list of the exact-artifact approvals once, under its content address.
+
+    A full-release registration gives every file of a release the same evidence list; repeated for each of 25,000
+    files it made a study's download-review file about 1 GB. Approvals name their set instead, and sets no approval
+    names are dropped. Lossless: approval_evidence() returns the same list as before. Changes `reviews` in place.
+    """
+    approvals = reviews.get("approved_artifacts", [])
+    known = dict(reviews.get("evidence_sets", {}))
+    for approval in approvals:
+        if "metadata_evidence" in approval:
+            evidence = approval.pop("metadata_evidence")
+            key = approval["metadata_evidence_set"] = evidence_set_key(evidence)
+            known[key] = evidence
+    named = dict.fromkeys(a["metadata_evidence_set"] for a in approvals if "metadata_evidence_set" in a)
+    used = {key: known[key] for key in named if key in known}  # a named set that is missing stays missing: the gate refuses it
+    if used or "evidence_sets" in reviews:
+        reviews["evidence_sets"] = used
+    if used:
+        reviews["schema_version"] = max(2, reviews.get("schema_version", 1))
+    return reviews
+
+
+def write_reviews(path, reviews):
+    """Write a download-review registry with its approval evidence shared (see share_evidence)."""
+    write_json(path, share_evidence(reviews))
+
+
 def collection_file(name):
     """Resolve a historical top-level file after documented housekeeping."""
     ledger = COLLECTION / 'organization.json'

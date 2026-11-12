@@ -117,6 +117,13 @@ instruction or permission to expand another dataset.
    the missing-checksum acknowledgement), a file the checksum file lists but the folder lacks blocks the
    import, and the same approval, size and licence gates apply; record the agreement in the dataset's
    licence review first, or the files stay unbound.
+   `--file-list ID=FILE` is for an open provider without an automated route: read the exact download
+   URLs from the provider's own pages into a JSON list (`dataset_id`, `release`, `prepared_from`, `files`
+   with `url`, `path` and the provider's `bytes` and `md5`/`sha256`/`git_blob_sha1` where it publishes them;
+   `left_out` for sources the list cannot cover, with the reason). Copy checksums only from the provider's
+   own listing (an API record, a Git LFS pointer, a checksum file), never compute them from your download;
+   files without one need the missing-checksum acknowledgement. The files keep their real URLs and the
+   list and its pages are kept as evidence; it never bypasses a registration or agreement route.
    Missing access or permission remains a blocked/manual action. Staging does not
    authorize workflow AI. Do not enlarge requested transfer limits silently.
 6. Preserve all existing provider bytes and sealed runs. Keep

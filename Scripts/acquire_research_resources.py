@@ -26,7 +26,7 @@ import time
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from public_resources import contained, digest, write_json
+from public_resources import approval_evidence, contained, digest, write_json
 
 CODE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CODE_ROOT / 'src'))
@@ -96,12 +96,13 @@ def require_download_review(item, locked):
             raise ValueError('download_review_artifact_identity_or_budget_changed: ' + field)
     checks = ('clinical_content', 'subject_and_grain', 'value_units_codes', 'time_semantics',
               'format_and_size', 'duplicate_overlap', 'test_gap', 'access')
+    metadata_evidence = approval_evidence(registry, approval)  # its own list or the shared set it names
     if (approval.get('decision') != 'approve_minimal_subset' or
         any(approval.get('checks', {}).get(k) is not True for k in checks) or
         not approval.get('use_case') or not approval.get('file_selection_reason') or
-        not approval.get('metadata_evidence')):
+        not metadata_evidence):
         raise ValueError('download_review_incomplete_or_not_approved')
-    for evidence in approval['metadata_evidence']:
+    for evidence in metadata_evidence:
         path = contained(ROOT, evidence['path'])
         if not path.is_file() or digest(path) != evidence['sha256']:
             raise ValueError('download_review_metadata_missing_or_changed')

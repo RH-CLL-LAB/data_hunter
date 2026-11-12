@@ -466,20 +466,25 @@ def rewrite_url(url,source,page):
     return href(target,page)+(('#'+fragment) if fragment else '')
 
 
-def inline(text,source,page):
+def inline(text,source,page,link=None):
+    """One line of Markdown as HTML. `link` maps a Markdown link target to an href, or to None when the target cannot be
+    reached from the output (the label is then kept as text); by default links are rewritten to the site's pages."""
     tokens=[]
     def reserve(value): tokens.append(value); return f'\x00{len(tokens)-1}\x00'
+    def linked(label,url):
+        target=(link or rewrite_url)(url,source,page)
+        return a(label,target) if target is not None else f'<span class="offsite" title="A page of the local Data Hunter site; not part of this file">{e(label)}</span>'
     text=re.sub(r'`([^`]+)`',lambda m:reserve('<code>'+e(m[1])+'</code>'),text)
-    text=re.sub(r'\[([^\]]+)\]\((<[^>]+>|[^\s)]+)\)',
-                lambda m:reserve(a(m[1],rewrite_url(m[2].strip('<>'),source,page))),text)
+    text=re.sub(r'\\([\\`*\[\]()|])',lambda m:reserve(e(m[1])),text)  # Markdown backslash escapes: an escaped bracket never starts a link
+    text=re.sub(r'\[([^\]]+)\]\((<[^>]+>|[^\s)]+)\)',lambda m:reserve(linked(m[1],m[2].strip('<>'))),text)
     text=e(text)
     text=re.sub(r'\*\*([^*]+)\*\*',r'<strong>\1</strong>',text)
     for i,value in enumerate(tokens): text=text.replace(f'\x00{i}\x00',value)
     return text
 
 
-def markdown(source,page):
-    """Render the repository's headings, tables, lists, links and fenced code locally."""
+def markdown(source,page,link=None):
+    """Render the repository's headings, tables, lists, links and fenced code locally (`link`: see inline())."""
     lines=source.read_text().splitlines();out=[];i=0
     while i<len(lines):
         line=lines[i].strip()
@@ -490,12 +495,12 @@ def markdown(source,page):
             out.append('<pre><code>'+e('\n'.join(code))+'</code></pre>');i+=1;continue
         heading=re.match(r'^(#{1,6}) (.+)',line)
         if heading:
-            level=len(heading[1]);out.append(f'<h{level} id="{slug(heading[2])}">{inline(heading[2],source,page)}</h{level}>');i+=1;continue
+            level=len(heading[1]);out.append(f'<h{level} id="{slug(heading[2])}">{inline(heading[2],source,page,link)}</h{level}>');i+=1;continue
         if line.startswith('|') and i+1<len(lines) and re.match(r'^\|[\s:|\-]+\|$',lines[i+1].strip()):
             def cells(value): return [x.strip().replace('\\|','|') for x in re.split(r'(?<!\\)\|',value.strip().strip('|'))]
             headers=cells(line);rows=[];i+=2
             while i<len(lines) and lines[i].strip().startswith('|'):
-                rows.append([inline(x,source,page) for x in cells(lines[i])]);i+=1
+                rows.append([inline(x,source,page,link) for x in cells(lines[i])]);i+=1
             out.append(table(headers,rows));continue
         if re.match(r'^(?:- |\d+\. )',line):
             ordered=bool(re.match(r'^\d+\. ',line));tag='ol' if ordered else 'ul';items=[]
@@ -506,14 +511,136 @@ def markdown(source,page):
                     break
                 match=re.match(r'^(?:- |\d+\. )(.+)',current)
                 if not match:break
-                items.append('<li>'+inline(match[1],source,page)+'</li>');i+=1
+                items.append('<li>'+inline(match[1],source,page,link)+'</li>');i+=1
             out.append(f'<{tag}>'+''.join(items)+f'</{tag}>');continue
         if re.fullmatch(r'<a id="[\w-]+"></a>',line):out.append(line);i+=1;continue
         if line in ['<details>','</details>'] or line.startswith('<summary>'):out.append(line);i+=1;continue
         text=[line];i+=1
         while i<len(lines) and lines[i].strip() and not re.match(r'^(#|\||```|<|\- |\d+\. )',lines[i].strip()):text.append(lines[i].strip());i+=1
-        out.append('<p>'+inline(' '.join(text),source,page)+'</p>')
+        out.append('<p>'+inline(' '.join(text),source,page,link)+'</p>')
     return '<div class="prose">'+''.join(out)+'</div>'
+
+
+STANDALONE_CSS='''
+:root{--bg:#fbfaf7;--panel:#ffffff;--ink:#1d232b;--muted:#5d6670;--line:#dcd8cf;--accent:#1f5f8b;--code:#f1eee7;--note:#fff6dc;--noteline:#e2c46b}
+@media (prefers-color-scheme:dark){:root{--bg:#15181c;--panel:#1c2026;--ink:#e6e8eb;--muted:#a3abb4;--line:#323942;--accent:#7cb7e3;--code:#262b33;--note:#2b2617;--noteline:#7a6524}}
+*{box-sizing:border-box}html{scroll-padding-top:12px}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+a{color:var(--accent)}code{font:12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--code);padding:1px 4px;border-radius:4px;overflow-wrap:anywhere}
+.top{display:flex;flex-wrap:wrap;gap:12px 24px;align-items:flex-end;justify-content:space-between;padding:20px 24px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.kicker{margin:0;color:var(--muted);font-size:12px;letter-spacing:.06em;text-transform:uppercase}.top h1{margin:4px 0 2px;font-size:24px;line-height:1.25}.sub{margin:0;color:var(--muted)}
+.actions{display:flex;gap:8px;flex-wrap:wrap}button{font:inherit;font-size:13px;padding:6px 12px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);cursor:pointer}button:hover{border-color:var(--accent)}
+.notice{margin:16px 24px 0;padding:10px 14px;border:1px solid var(--noteline);border-radius:8px;background:var(--note);font-size:14px}
+.layout{display:grid;grid-template-columns:260px minmax(0,1fr);gap:24px;padding:16px 24px 48px}
+.toc{position:sticky;top:12px;align-self:start;max-height:calc(100vh - 24px);overflow:auto;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:13px}
+.toc input{width:100%;font:inherit;padding:6px 8px;margin-bottom:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)}
+.toc ul{list-style:none;margin:0;padding:0}.toc li{margin:1px 0}.toc .toc2{margin-top:8px;font-weight:600}.toc .toc3 a{display:block;padding:1px 0 1px 10px;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+main{min-width:0}.prose{max-width:none}.prose h1{display:none}.prose h2{margin:32px 0 10px;padding-top:8px;border-top:2px solid var(--line);font-size:21px}
+.prose h3{margin:28px 0 8px;font-size:17px}.prose h4{margin:18px 0 6px;font-size:14.5px}.prose p,.prose li{max-width:1100px}
+.tablewrap{overflow-x:auto;margin:8px 0 14px;border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;overflow-wrap:break-word}th{position:sticky;top:0;background:var(--code)}
+details{margin:8px 0;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel)}summary{cursor:pointer;font-weight:600}
+.offsite{border-bottom:1px dotted var(--muted)}.hidden{display:none}
+.prose.single>*{display:none}.prose.single>section.ds.current{display:block}.prose.single>section.ds.current>h3{margin-top:4px}
+.viewbar{position:sticky;top:0;z-index:2;display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between;margin:0 0 8px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-weight:600}
+.viewbar.hidden{display:none}.toc .toc3.active a{font-weight:700;color:var(--ink)}
+.credit{padding:16px 24px 28px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+@media (max-width:860px){.layout{grid-template-columns:1fr}.toc{position:static;max-height:40vh}}
+@media print{.toc,.actions,.viewbar,.notice button{display:none}.layout{display:block;padding:0}details{border:0}body{background:#fff;color:#000}th{position:static}}
+'''
+STANDALONE_JS='''
+(function(){
+  var prose=document.querySelector('main .prose');if(!prose)return;
+  var groups=[],current=null;
+  Array.prototype.slice.call(prose.children).forEach(function(node){
+    if(node.tagName==='H2'){current=null;return;}
+    if(node.tagName==='H3'){current=document.createElement('section');current.className='ds';current.dataset.filter=node.textContent.toLowerCase();current.dataset.title=node.textContent;prose.insertBefore(current,node);groups.push(current);}
+    if(current)current.appendChild(node);
+  });
+  var bar=document.createElement('div');bar.className='viewbar hidden';
+  bar.innerHTML='<span></span><button type="button" data-all>Show all datasets</button>';prose.parentNode.insertBefore(bar,prose);
+  var input=document.querySelector('.toc input'),items=document.querySelectorAll('.toc .toc3');
+  function sectionOf(id){var el=id&&document.getElementById(id);while(el&&el!==prose){if(el.classList&&el.classList.contains('ds'))return el;el=el.parentNode;}return null;}
+  function show(section){
+    groups.forEach(function(g){g.classList.toggle('current',g===section);});
+    prose.classList.toggle('single',!!section);bar.classList.toggle('hidden',!section);
+    items.forEach(function(li){var a=li.querySelector('a');li.classList.toggle('active',!!section&&sectionOf(decodeURIComponent(a.getAttribute('href').slice(1)))===section);});
+    if(section){bar.querySelector('span').textContent='Showing one dataset: '+section.dataset.title.split(' \u2014 ')[0];top();}
+  }
+  function top(){window.scrollTo(0,0);setTimeout(function(){window.scrollTo(0,0);},0);}  // after the browser's own jump to the anchor
+  function route(){
+    var id=decodeURIComponent(location.hash.slice(1)),section=sectionOf(id);
+    if(section&&input&&input.value){input.value='';input.dispatchEvent(new Event('input'));}
+    show(section);
+    if(!section&&id){var target=document.getElementById(id);if(target)target.scrollIntoView();}
+  }
+  window.addEventListener('hashchange',route);
+  bar.querySelector('[data-all]').addEventListener('click',function(){
+    var was=prose.querySelector('section.ds.current');history.replaceState(null,'',location.pathname+location.search);show(null);if(was)was.scrollIntoView();
+  });
+  if(input)input.addEventListener('input',function(){
+    var q=input.value.trim().toLowerCase();
+    if(q&&prose.classList.contains('single')){history.replaceState(null,'',location.pathname+location.search);show(null);}
+    items.forEach(function(li){li.classList.toggle('hidden',!!q&&li.dataset.filter.indexOf(q)<0);});
+    groups.forEach(function(g){g.classList.toggle('hidden',!!q&&g.dataset.filter.indexOf(q)<0);});
+  });
+  function all(open){document.querySelectorAll('main details').forEach(function(d){d.open=open;});}
+  document.querySelector('[data-expand]').addEventListener('click',function(){all(true);});
+  document.querySelector('[data-collapse]').addEventListener('click',function(){all(false);});
+  document.querySelector('[data-print]').addEventListener('click',function(){all(true);window.print();});
+  route();
+  window.addEventListener('load',function(){if(prose.classList.contains('single'))top();});
+})();
+'''
+
+
+def standalone_link(siblings=None):
+    """The link rule of a one-file export: web links and in-document anchors stay, files sent beside it (`siblings`, by
+    the name the document uses) keep a relative link, and any other workspace link becomes its label."""
+    def link(url,source,page):
+        parsed=urlsplit(url)
+        if parsed.scheme or url.startswith('//') or (not parsed.path and parsed.fragment):return url
+        name=unquote(parsed.path)
+        return quote(siblings[name]) if name in (siblings or {}) else None
+    return link
+
+
+def standalone_document(source,title,subtitle,notice,siblings=None):
+    """A docs/ Markdown report as one self-contained HTML file: inline style and script, no other files, no network.
+
+    For sending a report outside the site. It is rendered by the same code as the site page; links that cannot leave the
+    site become text, and a contents list with a dataset filter, expand/collapse and print buttons is added. Opening a
+    dataset (from the contents, a table or a #id address) shows that dataset alone until “Show all datasets”."""
+    source=Path(source);entries=[]
+    for line in source.read_text().splitlines():
+        heading=re.match(r'^(#{2,3}) (.+)',line.strip())
+        if not heading:continue
+        label=re.sub(r'\\(.)',r'\1',re.sub(r'`([^`]+)`',r'\1',heading[2]))
+        if heading[1]=='##':entries.append(f'<li class="toc2"><a href="#{e(slug(heading[2]))}">{e(label)}</a></li>')
+        else:
+            short,_,name=label.partition(' — ')
+            entries.append(f'<li class="toc3" data-filter="{e(label.lower())}"><a href="#{e(slug(heading[2]))}" title="{e(name or label)}">{e(short)}</a></li>')
+    body=markdown(source,OUT/'standalone.html',standalone_link(siblings))
+    return ('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'<meta name="generator" content="Data Hunter"><title>{e(title)}</title><style>{STANDALONE_CSS}</style></head><body>'
+            f'<header class="top"><div><p class="kicker">Data Hunter · standalone report</p><h1>{e(title)}</h1><p class="sub">{e(subtitle)}</p></div>'
+            '<div class="actions"><button type="button" data-expand title="Open every collapsed table list">Expand all</button><button type="button" data-collapse title="Close every table list">Collapse all</button>'
+            '<button type="button" data-print title="Print what is shown: one dataset or all of them, with every table list open">Print</button></div></header>'
+            f'<p class="notice">{notice}</p><div class="layout"><nav class="toc" aria-label="Contents"><input type="search" placeholder="Filter datasets by ID or name" aria-label="Filter datasets">'
+            f'<ul>{"".join(entries)}</ul></nav><main>{body}</main></div><footer class="credit">Made with {e(TOOL_NAME)}, developed by Nikola Tom (group leader: Carsten Utoft Niemann); '
+            'code and documentation Apache-2.0. Please cite the authors and the tool; every dataset keeps its own licence.</footer>'
+            f'<script>{STANDALONE_JS}</script></body></html>')
+
+
+STRUCTURE_TITLE='Data structure: tables, columns, types and statistics'
+
+
+def structure_export(source,siblings=None,variables_name='DATASET_VARIABLES.csv',study=None):
+    """The data-structure report as one HTML file, with the notice that it carries data-derived content."""
+    study=study or workspace_study_id(ROOT) or 'this workspace'
+    notice=('<strong>Data-derived content.</strong> This file lists the column names, types, statistics and the values of low-cardinality columns of the held files. '
+            'It grants no data or AI-use permission, and sending it shares content derived from each dataset: check the terms of every dataset it covers first. '
+            f'The variable dictionary (<code>{e(variables_name)}</code>, one row per column) is a separate file under the same terms.')
+    return standalone_document(source,STRUCTURE_TITLE,f'Study {study} · exported {datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")}',notice,siblings)
 
 
 def registered_workspaces(page):
@@ -1237,7 +1364,12 @@ def build():
         ('licenses.html','Licensing & AI use','Rights · source identities · operation gates','The source-bound runtime policy in both lenient and restrictive modes. Pre-registration screening and actual workflow permissions remain separate.','DATA_LICENSES_AND_AI_USE.md','Licensing'),
         ('status.html','Status & next actions','Automatic · partial · action needed · no route','One state per dataset, derived from the lock, the exact-artifact reviews, the licence registers, the download runs and the quarantine listing: what the agent obtained, what is partial, and the one step each blocked dataset needs from you.','DATASET_STATUS.md','Status & actions'),
         *([('structure.html','Data structure','Tables · columns · types · statistics','What is inside the held files, table by table: columns, declared or inferred types, missingness and descriptive statistics; for the datasets that are not held, what the held releases of the same family and the retained documentation indicate before you apply for access. Deterministic census; it grants no data or AI-use permission.','DATASET_STRUCTURE.md','Data structure')] if has_structure() else [])]:
-        page=OUT/name;pages[page]=shell(page,title,hero(kicker,title,description)+'<section class="panel" style="margin-bottom:50px">'+markdown(ROOT/'docs'/source,page)+'</section>',active)
+        page=OUT/name;export=''
+        if name=='structure.html' and (ROOT/'docs/DATASET_STRUCTURE.html').exists():  # the report as one file for a collaborator, written with the Markdown by report_dataset_structure.py
+            export=(f'<p class="exportnote"><a href="{href(ROOT/"docs/DATASET_STRUCTURE.html",page)}" download="{e((workspace_study_id(ROOT) or "study")+"-data-structure-"+datetime.now().strftime("%Y-%m-%d"))}.html">Download this report as one HTML file</a>'
+                    ' · it opens offline in any browser and needs no other file; send the '+(a('variable dictionary (CSV)',href(ROOT/'docs/DATASET_VARIABLES.csv',page)) if (ROOT/'docs/DATASET_VARIABLES.csv').exists() else 'variable dictionary')
+                    +' with it. Both contain data-derived content: check each dataset’s terms before sharing.</p>')
+        pages[page]=shell(page,title,hero(kicker,title,description)+'<section class="panel" style="margin-bottom:50px">'+export+markdown(ROOT/'docs'/source,page)+'</section>',active)
     pages[OUT/'quarantine.html']=quarantine_page()
     pages[OUT/'activity.html']=activity_page()
     for study in RESEARCH_STUDIES['studies']:

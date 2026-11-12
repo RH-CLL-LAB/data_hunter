@@ -255,7 +255,10 @@ class RunTests(WorkspaceFixture):
         reviews = json.loads((self.root / 'configs/dataset_download_reviews.json').read_text())
         self.assertEqual(reviews['reviews'][0]['full_release']['files'], 2)
         self.assertEqual([a['download_license_resources'] for a in reviews['approved_artifacts']], [['zen_cc_by'], ['zen_cc_by']])
-        evidence = reviews['approved_artifacts'][0]['metadata_evidence']
+        self.assertEqual(len({a['metadata_evidence_set'] for a in reviews['approved_artifacts']}), 1, 'the files of one release share one stored evidence list')
+        self.assertEqual((list(reviews['evidence_sets']), reviews['schema_version']), ([reviews['approved_artifacts'][0]['metadata_evidence_set']], 2))
+        self.assertNotIn('metadata_evidence', reviews['approved_artifacts'][0])
+        evidence = module.acquisition.approval_evidence(reviews, reviews['approved_artifacts'][1])
         self.assertTrue(any(e['path'].endswith('zenodo_1_record.json') for e in evidence) and any(e['path'] == 'notice.txt' for e in evidence))
         for item in evidence:
             self.assertEqual(hashlib.sha256((self.root / item['path']).read_bytes()).hexdigest(), item['sha256'])
@@ -588,6 +591,83 @@ class RunTests(WorkspaceFixture):
             with self.assertRaisesRegex(ValueError, 'import_dataset_not_in_instructions'):
                 module.run(self.instructions, root=self.root, import_from={'OTHER': str(folder)})
         self.assertEqual(self.web.calls, [])
+
+    def file_list(self, **changes):
+        listing = {'dataset_id': 'ZEN', 'release': 'Provider files listed by hand (fixture)', 'prepared_from': ['https://provider.example/files/'],
+                   'files': [{'url': 'https://provider.example/files/data.csv', 'path': 'data.csv', 'bytes': 8, 'md5': 'c' * 32},
+                             {'url': 'https://cdn.provider.example/x/README.md', 'path': 'docs/README.md', 'sha256': 'a' * 64},
+                             {'url': 'https://provider.example/files/notes.txt', 'path': 'notes.txt', 'bytes': 6}],
+                   'left_out': [{'source': 'https://provider.example/members/mapping.zip', 'reason': 'member login required'}], **changes}
+        path = self.root / 'lists' / 'zen.json'
+        write(path, listing)
+        return path
+
+    def test_file_list_keeps_the_real_urls_and_the_provider_identities_it_lists(self):
+        self.web = FakeWeb({'https://provider.example/files/': (200, b'<html>listing</html>'), 'https://cdn.provider.example/x/README.md': (200, b'# readme\n')})
+        path = self.file_list()
+        seen = []
+
+        def fake_acquire(item, locked, base, execute, journal, license_context, **options):
+            seen.append(item)
+            target = base / item['path']
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b'x' * item['expected_bytes'])
+            return {'id': item['id'], 'path': item['path'], 'url': item['url'], 'bytes': item['expected_bytes'], 'sha256': hashlib.sha256(target.read_bytes()).hexdigest(),
+                    'hash_authority': 'fixture', 'acquired_at': '2026-01-01T00:00:00+00:00', 'state': 'downloaded_verified', 'inspection': None}
+        with patch.object(module, 'fetch', self.web.fetch), patch.object(module.acquisition, 'acquire', fake_acquire):
+            report = module.run(self.instructions, root=self.root, register_jobs=False, file_lists={'ZEN': str(path)})
+            outcome = report['outcomes'][0]
+            self.assertEqual((outcome['outcome'], outcome['new_jobs'], outcome['unacknowledged_files']), ('ready_partial', 2, 1), 'listed checksums count; the unlisted one waits for the tick')
+            write(self.instructions, {**self.spec, 'technical_risk_acknowledgements': ['missing_provider_checksum'], 'direct_holdings_for_acknowledged_risks': True})
+            report = module.run(self.instructions, root=self.root, register_jobs=True, execute_jobs=True, file_lists={'ZEN': str(path)})
+        self.assertEqual(sorted(set(self.web.calls)), [('GET', 'https://provider.example/files/'), ('HEAD', 'https://cdn.provider.example/x/README.md')],
+                         'only the cited page and the size the list omits are asked of the provider')
+        outcome = report['outcomes'][0]
+        self.assertEqual((outcome['outcome'], outcome['release'], outcome['file_list'], outcome['unsupported_urls']),
+                         ('ready_partial', 'Provider files listed by hand (fixture)', str(path.resolve()), ['https://provider.example/members/mapping.zip']), 'every listed file is registered; the left-out source keeps it partial')
+        self.assertEqual((outcome['new_jobs'], outcome['unacknowledged_files']), (3, 0))
+        self.assertEqual(outcome['manifest'], 'zen.json: 3 files listed by hand from 1 provider pages')
+        by_path = {j['path']: j for j in seen}
+        self.assertEqual({p: j['url'] for p, j in by_path.items()}, {'datasets/zen/data.csv': 'https://provider.example/files/data.csv', 'datasets/zen/docs/README.md': 'https://cdn.provider.example/x/README.md',
+                                                                    'datasets/zen/notes.txt': 'https://provider.example/files/notes.txt'})
+        self.assertEqual((by_path['datasets/zen/data.csv']['provider_md5'], by_path['datasets/zen/docs/README.md']['provider_sha256'], by_path['datasets/zen/docs/README.md']['expected_bytes']), ('c' * 32, 'a' * 64, 9))
+        self.assertNotIn('provider_md5', by_path['datasets/zen/notes.txt'])
+        names = [Path(e['path']).name for e in outcome['evidence']]
+        self.assertTrue(names[0].startswith('file_list_zen_') and names[0].endswith('_zen.json') and names[1].startswith('file_list_zen_source_'), names)
+        self.assertEqual(outcome['evidence'][1]['url'], 'https://provider.example/files/')
+        entry = json.loads((self.root / 'configs/dataset_download_reviews.json').read_text())['reviews'][0]
+        self.assertEqual((entry['full_release']['complete'], entry['full_release']['unsupported_sources']), (False, ['https://provider.example/members/mapping.zip']), 'a left-out source keeps the dataset partial')
+        lock = {f['path']: f['url'] for f in json.loads((self.root / 'configs/research_resources.lock.json').read_text())['files']}
+        self.assertEqual(lock['datasets/zen/notes.txt'], 'https://provider.example/files/notes.txt')
+        rows = [json.loads(l) for l in (self.root / report['run'] / 'operations.jsonl').read_text().splitlines()]
+        self.assertEqual(rows[0]['details']['file_lists'], {'ZEN': str(path.resolve())})
+
+    def test_file_list_is_refused_when_malformed_or_behind_a_registration_route(self):
+        self.web = FakeWeb({'https://provider.example/files/': (200, b'<html>listing</html>')})
+        cases = [({'dataset_id': 'OTHER'}, 'file_list_names_another_dataset'),
+                 ({'files': [{'url': 'https://provider.example/a', 'path': '../escape.csv'}]}, 'file_list_unsafe_path'),
+                 ({'files': [{'url': 'http://provider.example/a', 'path': 'a.csv'}]}, 'file_list_url_must_be_https'),
+                 ({'files': [{'url': 'https://provider.example/a', 'path': 'a.csv', 'md5': 'xyz'}]}, 'file_list_malformed_md5'),
+                 ({'files': [{'url': 'https://provider.example/a', 'path': 'a.csv'}, {'url': 'https://provider.example/b', 'path': 'a.csv'}]}, 'file_list_duplicate_path_or_url'),
+                 ({'files': ['https://provider.example/a']}, 'file_list_entry_is_not_an_object'),
+                 ({'prepared_from': []}, 'file_list_needs_the_https_provider_pages_it_was_prepared_from'),
+                 ({'left_out': [{'source': 'https://provider.example/m.zip'}]}, 'file_list_left_out_needs_https_source_and_reason')]
+        with patch.object(module, 'fetch', self.web.fetch):
+            for changes, reason in cases:
+                report = module.run(self.instructions, root=self.root, register_jobs=True, file_lists={'ZEN': str(self.file_list(**changes))})
+                self.assertTrue(report['outcomes'][0]['outcome'].startswith(reason), (changes, report['outcomes'][0]['outcome']))
+            self.assertEqual(json.loads((self.root / 'configs/research_resources.json').read_text())['resources'], [], 'nothing is registered from a refused list')
+            self.web = FakeWeb({})
+            with patch.object(module, 'fetch', self.web.fetch):
+                report = module.run(self.instructions, root=self.root, register_jobs=True, file_lists={'ZEN': str(self.file_list())})
+            self.assertEqual(report['outcomes'][0]['outcome'], 'file_list_source_page_unavailable_http_404: https://provider.example/files/')
+            with self.assertRaisesRegex(ValueError, 'file_list_dataset_not_in_instructions'):
+                module.run(self.instructions, root=self.root, file_lists={'OTHER': str(self.file_list())})
+            with self.assertRaisesRegex(ValueError, 'dataset_given_both_an_import_folder_and_a_file_list'):
+                module.run(self.instructions, root=self.root, file_lists={'ZEN': str(self.file_list())}, import_from={'ZEN': str(self.user_folder())})
+            self.reroute('registration_data_use_agreement')
+            report = module.run(self.instructions, root=self.root, register_jobs=True, file_lists={'ZEN': str(self.file_list())})
+        self.assertEqual(report['outcomes'][0]['outcome'], 'blocked_access_registration_data_use_agreement', 'a file list never bypasses an access route')
 
     def test_direct_holdings_option_locks_acknowledged_risk_files_with_recorded_caveats(self):
         record = {'metadata': {'access_right': 'open'}, 'files': [{'key': 'data.zip', 'size': 1000, 'checksum': 'md5:' + 'c' * 32}, {'key': 'notes.txt', 'size': 20}]}
