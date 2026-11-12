@@ -840,68 +840,213 @@ def merge_panel():
             '<p class="small">Hand the saved file to Claude Code or Codex: <code>.venv/bin/python Scripts/merge_study_facts.py --request &lt;file&gt; --apply</code> creates and registers the study, merges the facts in order and builds its catalogue, status document and site. The preview needs the local server (<code>python Scripts/serve.py</code>).</p></section>')
 
 
+TUTORIAL_SHOTS=ASSETS/'tutorial'  # screenshots of a real study's site, taken in the light theme at 1280 px
+
+
+def tutorial_images():
+    return sorted(TUTORIAL_SHOTS.glob('*.png')) if TUTORIAL_SHOTS.is_dir() else []
+
+
 def tutorial_page():
-    """A step-by-step walk through the Explorer, in the order a study actually proceeds."""
+    """The walk-through for a first-time user: every step says where it happens, what to do, what comes back, and shows it."""
     page=OUT/'tutorial.html';L=lambda text,name,frag='':a(text,href(OUT/name,page)+frag)
-    steps=[
-     ('Create a research study',
-      [f'Open {L("Research studies","research-studies.html","#new-study")} and fill in the new-study form: a stable ID, the research question, intended use, population, targets and inclusion/exclusion rules. These words drive the dataset search in the next step, so be specific.',
-       'Saving the study makes it the active one everywhere: the <strong>Study</strong> picker in the header switches between studies, and shortlists, annotations, saved filter views and the action log belong to the active study. Dataset files are shared holdings.',
-       'Permissions are never inherited: a dataset approved for one study still needs review for another. An existing study can be imported from its exported JSON instead.'],
-      [('Research studies','research-studies.html','')]),
-     ('Search for datasets for the study',
-      [f'After saving, the site opens {L("Search datasets","add-datasets.html")} in discovery mode with the study brief filled in. Review the generated prompt and pass it to Claude Code or Codex with the intake-agent definition.',
-       'The agent searches from scratch for this study, retains public licence and access notices with URL, date and hash within a small metadata budget, and only then matches results to existing catalogue IDs. It is licence-first and review-only: no dataset payload is transferred.',
-       'Results come back as study annotations (relevance, role, tags), a suggested shortlist and a discovery report registered with the study. New sources appear as catalogue entries with their licence evidence attached.'],
-      [('Search datasets','add-datasets.html',''),('Research studies','research-studies.html','')]),
-     ('Explore the catalogue',
-      [f'Open the {L("Dataset explorer","catalogue.html")}; it opens on the study’s shortlist when one exists. Search by name, ID, study, topic or your own tags; tick filter options in the left panel. Ticks within a group match any option; groups combine.',
-       'Under <em>This research study</em>, filter by the relevance, role, tags and shortlist the search produced. Under <em>Development readiness</em>, “Needs preparation / permission review” and “Incomplete” have nested reasons that say why entries are not ready. Every option has an ⓘ explanation and a live count.',
-       'Drag the handle between the filters and the table to widen the panel; the width is remembered in this browser. Sort by priority, name or retained size. Copy link shares the exact view.'],
-      [('Dataset explorer','catalogue.html',''),('How to read readiness','methods.html','#readiness')]),
-     ('Read a dataset record',
-      ['Open a row to see what the resource is good for, which files are held and verified, input/output/reference formats, and the published studies that used it.',
-       'Read <strong>Problems &amp; next steps</strong> for the recorded blockers (the catalogue row links there as “What’s missing”) and <strong>Access &amp; licensing</strong> for the access route, terms and the local AI permission status for the active study.',
-       '“Back to your selection” returns to the catalogue with your filters and ticks intact.'],
-      [example_record(RECORDS)]),
-     ('Refine the study shortlist',
-      ['Tick datasets in the table (or <em>Tick all matching</em>). Ticks survive searching and filtering; the selection bar says how many ticked datasets the current filters hide.',
-       '<em>Save to study shortlist</em> adds the ticked datasets to the active study’s shortlist. With nothing ticked it offers to replace the shortlist with everything matching, after confirmation.',
-       'Filter by <em>Study shortlist</em> to see it, and <em>Export CSV</em> for a metadata-only table of the ticked or matching entries. Nothing is downloaded.'],
-      [('Dataset explorer','catalogue.html','')]),
-     ('Review the annotations',
-      ['The dataset search (step 2) annotates every candidate for the study automatically: relevance, role (development, benchmark, reference, exclude), tags and a suggested shortlist, registered with the study and shown on the catalogue filters and dataset pages.',
-       f'You only step in where you disagree. On a dataset page, change the relevance, role, tags or note; on {L("Published studies & tools","studies.html")}, filter papers by annotation, reported task and the permission status of their linked datasets, and adjust paper annotations the same way.',
-       'Your own changes live in this browser until you export and register the study (step 10); registered annotations from the search stay visible alongside them.'],
-      [('Published studies & tools','studies.html','')]),
-     ('Record a licence decision',
-      ['When you have read the exact licence or agreement, open the dataset page’s <strong>Review licence and record decision</strong> form. Cite the retained notice, its SHA-256 and the official URL, and tick only the operations and files you actually reviewed.',
-       'Generate the decision, then hand the prompt or JSON to the agent, which validates and registers it with <code>Scripts/review_dataset_license.py</code>.',
-       'A manual decision cannot override an explicit prohibition, supply a missing agreement, or turn AI-silent terms into explicit approval. Saving the form grants nothing by itself.'],
-      [('Licensing','licenses.html','')]),
-     ('Prepare a download',
-      ['Tick the datasets, then <strong>Download…</strong>. Choose the scope: investigate and register only, the reviewed minimal package, or a specified full release. Choose lenient or strict licensing and, if needed, byte limits and technical exceptions.',
-       'Generate the prompt or save the task CSV and give it to Claude Code or Codex with the download-agent definition. The agent resolves exact versions and manifests, checks rights and access, and never labels partial holdings complete.',
-       'Downloading grants no AI-use permission: the source-bound preflight runs again before any inference or embeddings.'],
-      [('Download guide','downloads.html',''),('Priorities & access','actions.html','')]),
-     ('Work with held files',
-      ['For ticked datasets with retained files, <strong>More actions</strong> offers verify, copy, prepare workflow inputs, plan a move and plan a removal, plus a file-inventory export.',
-       'Each action produces a CSV task for the operations agent. Removal and relocation are plans only; the agent asks for confirmation of the concrete file list before changing anything.'],
-      [('Dataset explorer','catalogue.html','')]),
-     ('Export and register the study',
-      [f'On {L("Research studies","research-studies.html")}, <strong>Export study, shortlist &amp; annotations</strong> saves a JSON file. Pass it to Claude Code or Codex to register with <code>Scripts/register_research_study.py --request /path/to/study.json --apply</code>.',
-       'Registration makes the brief, shortlist and annotations durable and appends this browser’s actions to the study’s log. Registered reports and the log appear on the same page. You can register early and re-register after each round of changes.',
-       'Registration grants no data permissions either; it records what was decided and done. To drop a study later: a browser draft is deleted on the Research studies page; a registered one is removed with <code>Scripts/register_research_study.py --remove STUDY_ID --apply</code>, which keeps its reports and log.'],
-      [('Research studies','research-studies.html','')])]
-    body=hero('Tutorial · step by step','How to use '+TOOL_NAME,'Ten steps from a new research question to a registered, licence-reviewed dataset selection: create the study, search for its datasets, then explore, shortlist, review and acquire. Each step links to the page where it happens.')
+    def fig(name,alt,caption):
+        path=TUTORIAL_SHOTS/f'{name}.png'
+        if not path.exists():return ''
+        src=href(OUT/'assets'/'tutorial'/path.name,page)+'?v='+digest(path)[:12]
+        return (f'<figure class="tutorialshot"><a href="{e(src)}" title="Open the full-size screenshot"><img src="{e(src)}" alt="{e(alt)}" loading="lazy"></a>'
+                f'<figcaption>{caption}</figcaption></figure>')
+    def cmd(*lines):return '<pre class="tutorialcmd"><code>'+'\n'.join(e(x) for x in lines)+'</code></pre>'
+    def ul(*items):return '<ul>'+''.join(f'<li>{x}</li>' for x in items)+'</ul>'
+    def block(label,body):return f'<h3 class="tutoriallabel">{e(label)}</h3>{body}'
+    parts=[
+     ('Part 1 · Set up a study','A study is one research question with its own brief, shortlist, licence decisions and reports. Everything later in the tutorial belongs to the study chosen in the header.',[
+      ('Open the site and pick a study',
+       block('Where','<p>The address <code>http://127.0.0.1:8767/</code> after starting the local server (see <a href="#before-you-start">Before you start</a>).</p>')
+       +block('What you see',ul('The <strong>Study</strong> picker in the header: every page shows the active study, and switching it switches the shortlist, annotations, reports and status everywhere.',
+            'The navigation, in the order a study proceeds: Research studies, Search datasets, Dataset explorer, then Activity, Status &amp; actions, Data structure and Quarantine once data arrive.',
+            '<strong>Appearance</strong> switches between light and dark; every ⓘ button explains the control next to it.'))
+       +fig('01-home','The home page with the study picker, navigation and the study’s headline numbers','The home page of a registered study. The four numbers summarise its catalogue; “Start a new study” leads to step 2.'),
+       [('Home','index.html','')]),
+      ('Create a research study',
+       block('What you do',f'<p>Open {L("Research studies","research-studies.html","#new-study")} and fill in <strong>Start a new research study</strong>:</p>'
+            +ul('<strong>Study ID</strong>: short, lowercase, with hyphens, e.g. <code>sepsis-lab-mapping</code>. It becomes the folder <code>studies/&lt;id&gt;/</code> and cannot be changed later.',
+                '<strong>Research question</strong> and <strong>Intended data and AI use</strong>: be specific, including whether you plan local analysis only, AI inference or model training. Licence checks are made against this purpose.',
+                '<strong>Population</strong>, <strong>Target variables</strong>, <strong>Include</strong> and <strong>Exclude</strong>: these words drive the dataset search in step 3, so name the variables, cohorts and access conditions you care about.'))
+       +block('What happens','<p><strong>Create study and start dataset search</strong> saves the study in this browser as a draft and opens the search page with the brief filled in. The draft becomes durable when you register it (step 17); you can register right away or after the first search.</p>')
+       +block('Good to know',ul('Permissions are never inherited: a dataset approved for one study still needs its own review here.','Dataset files are shared holdings on disk; holding a file is never permission to use it for a study.'))
+       +fig('02-new-study','The new-study form filled in for an example sepsis study','The new-study form with an example brief. Fields with a red outline are required.'),
+       [('Research studies','research-studies.html','#new-study')]),
+      ('Search for datasets for the study',
+       block('What you do',f'<p>On {L("Search datasets","add-datasets.html")} choose <strong>Discover studies &amp; benchmarks</strong> for a broad search from the brief, or <strong>Investigate a dataset or paper</strong> for one known source (give its official URL). Pick the licence criterion: <strong>Lenient</strong> (default) reports a source as usable when the rights exist and nothing explicitly bans your AI use; <strong>Strict</strong> also requires explicit AI approval. Tick the confirmation, then <strong>Generate prompt</strong>.</p>')
+       +block('Hand it to the agent','<p>Copy the prompt into Claude Code or Codex, opened in this repository, or attach the saved task file. The agent follows <code>agents/dataset-intake-agent.md</code>.</p>')
+       +block('What comes back',ul('Candidate datasets as catalogue entries, each with its licence and access notices retained (URL, date and hash).',
+            'Annotations for your study (relevance, role, tags), a suggested shortlist and a dated discovery report under the study’s <code>reports/</code>.',
+            'No data: the search is review-only and keeps at most 5 MB of public notices and documentation.'))
+       +fig('03-search','The intake request form on the Search datasets page','Preparing a search. The prompt preview below the buttons shows exactly what the agent will be asked; nothing starts until you hand it over.'),
+       [('Search datasets','add-datasets.html','')])]),
+     ('Part 2 · Choose datasets','Read what each candidate is, what is held, what it may be used for, and keep the ones that fit.',[
+      ('Explore the catalogue',
+       block('What you do',ul(f'Open the {L("Dataset explorer","catalogue.html")}. Search by name, ID, topic or your own tags; tick options in the <strong>Filters</strong> panel (ticks in one group match any option; groups combine). Every option shows a live count and an ⓘ explanation.',
+            'Under <em>This research study</em> filter by the relevance, role and shortlist from the search. Under <em>Development readiness</em> the nested reasons say why an entry is not ready.',
+            'Sort by priority, name or size; <strong>Copy link</strong> shares the exact view, filters and ticks included.'))
+       +fig('04-explorer','The dataset explorer with the search box, selection bar, filters and the table','The explorer. The bar above the table counts matching and ticked datasets and holds the actions of steps 6, 8 and 16.'),
+       [('Dataset explorer','catalogue.html',''),('How to read readiness','methods.html','#readiness')]),
+      ('Read a dataset record',
+       block('What you see',ul('<strong>Data links</strong> and <strong>Where the files are</strong>: what is held, verified and locked, file by file with checksums.',
+            '<strong>What this resource is good for</strong>, <strong>Size, completeness &amp; structure</strong> and <strong>Input, output &amp; reference format</strong>.',
+            '<strong>Problems &amp; next steps</strong>: the recorded blockers (the catalogue’s “What’s missing” link lands here).',
+            '<strong>Access &amp; licensing</strong>: the access route, the retained notices and the AI-use status for the active study.'))
+       +fig('07-dataset','The top of a dataset page for the MIMIC-IV demo','A dataset page. The side menu jumps to each section; “Back to your selection” returns to the explorer with your filters.')
+       +fig('08-access','The Access and licensing section of a dataset page','Access &amp; licensing: what the terms say, which licence records exist for this study and what is still unreviewed.'),
+       [example_record(RECORDS)]),
+      ('Refine the study shortlist',
+       block('What you do',ul('Tick datasets in the table, or <strong>Tick all matching</strong>. Ticks survive searching and filtering; the bar says how many ticked datasets the current filters hide.',
+            '<strong>Save to study shortlist</strong> adds the ticked datasets to the active study’s shortlist; filter by <em>Study shortlist</em> to see it.',
+            '<strong>Export</strong> saves a metadata-only CSV of the ticked or matching entries. Nothing is downloaded.',
+            f'Disagree with the search’s annotations? Change relevance, role, tags or note on the dataset page, and paper annotations on {L("Published studies & tools","studies.html")}.'))
+       +fig('05-ticked','Three ticked datasets with the selection bar enabled','Three datasets ticked: the selection bar enables Download… and More actions for exactly these.'),
+       [('Dataset explorer','catalogue.html',''),('Published studies & tools','studies.html','')]),
+      ('Record a licence decision',
+       block('What you do','<p>When you have read the exact licence or agreement, open <strong>Review licence and record decision</strong> on the dataset page. Choose the decision, pick the retained notice you read (it fills the evidence fields), name the exact release, and tick only the operations you actually reviewed: local inference, local embeddings, online use, training, redistribution.</p>')
+       +block('Hand it to the agent','<p>Generate the decision and give the prompt or saved JSON to the agent; it validates and registers it with <code>Scripts/review_dataset_license.py</code> (following <code>agents/dataset-license-review-agent.md</code>).</p>')
+       +block('Good to know',ul('A decision cannot override an explicit prohibition, replace a missing agreement or turn AI-silent terms into explicit approval.','Each operation is decided separately; saving the form grants nothing by itself.'))
+       +fig('09-licence-form','The licence review form with decision, evidence and operations','The licence review form. Only the operations you tick are decided; the others stay unreviewed.'),
+       [('Licensing','licenses.html','')])]),
+     ('Part 3 · Get the data','Prepare a download in the browser, let the agent run it, then see what arrived and what you must obtain yourself.',[
+      ('Prepare a download',
+       block('What you do',f'<p>Tick the datasets in the {L("Dataset explorer","catalogue.html")} and press <strong>Download…</strong>. The dialog asks:</p>'
+            +ul('<strong>Download scope</strong>: investigate and register only; the minimal useful package; or the <strong>full release</strong> (every file of an exact provider version, up to 20 GB per dataset).',
+                '<strong>Licensing</strong>: lenient or strict, as in step 3.',
+                '<strong>Open-access files with unresolved licence</strong>: also fetch open files whose terms nobody has reviewed yet. They are held as <em>rights-unresolved</em> and stay blocked for AI use until you record a decision (step 7).',
+                '<strong>Reuse files another study already holds</strong>: copy files another study downloaded and verified instead of downloading them again. Each copy is checked against its recorded hash and passes this study’s own gates.',
+                '<strong>Optional technical exceptions and download limits</strong>: accept a missing provider checksum or an unknown size (such files go to quarantine unless you also choose “No quarantine”), and cap the bytes.'))
+       +block('Hand it to the agent','<p><strong>Generate prompt</strong> or <strong>Save task CSV</strong>, then give it to the agent. For a full release it runs the resolver, which pins the provider’s file list, checks size, identity and licence for every file, and transfers what passes:</p>'
+            +cmd('.venv/bin/python Scripts/resolve_full_release.py --instructions <saved file> --execute'))
+       +block('Good to know',ul('Without <code>--execute</code> the resolver only reports what it would do: a safe first look.',
+            'A release larger than the limits is reported as size-blocked, never trimmed; partial holdings are never labelled complete.',
+            'Downloading grants no AI-use permission; the source-bound check runs again before any inference or embeddings.'))
+       +fig('06-download','The download dialog with full release and reuse of held files selected','The download dialog for three ticked datasets: full release, lenient licensing, and reuse of files other studies hold.'),
+       [('Download guide','downloads.html',''),('Priorities & access','actions.html','')]),
+      ('Follow the run',
+       block('Where',f'<p>{L("Activity","activity.html")} lists the scripts running now with their progress, every study’s milestones and holdings, and what still stands in the way. It refreshes every 20 seconds from the local server.</p>')
+       +block('Long runs',ul('Large releases can take hours. Keep the computer awake (on a Mac the agent runs transfers under <code>caffeinate -i</code>; a closed lid still sleeps).',
+            'GitHub allows 60 unauthenticated requests an hour; a run that hits the limit reports <em>github_api_rate_limited_retry_after…</em> for those datasets. Run them again after that time:'
+            +cmd('.venv/bin/python Scripts/resolve_full_release.py --instructions <saved file> --execute --datasets ID1 ID2'),
+            'A dataset whose sources did not all answer is reported as partial, never complete; rerunning it adds the missing files.'))
+       +fig('10-activity','The Activity page while a full-release download runs','Activity during a download: the resolver is listed under Running now with its run time; one card per study follows below.'),
+       [('Activity','activity.html','')]),
+      ('Check the status and get the rest yourself',
+       block('Where',f'<p>{L("Status & actions","status.html")} gives every dataset one state, with the single step it needs from you:</p>'
+            +ul('<strong>AUTOMATIC</strong>: the complete release is held and verified; nothing to do.',
+                '<strong>PARTIAL</strong>: part is held; the row says what is missing and why.',
+                '<strong>ACTION NEEDED</strong>: nothing is held until you act, for example register with the provider, sign an agreement or decide the licence.',
+                '<strong>NO ROUTE</strong>: no public access route exists for this project.'))
+       +block('Data you download yourself','<p>For a credentialed or agreement-based release, follow the provider’s process, download the files into a folder outside the repository and keep the provider’s <code>SHA256SUMS</code> or <code>MD5SUMS</code> file with them. Record the agreement, then let the resolver import and verify the folder:</p>'
+            +cmd('.venv/bin/python Scripts/resolve_full_release.py --instructions <saved file> --execute --import-from DATASET_ID=/path/to/folder'))
+       +fig('11-status','The status page with its At a glance table','Status &amp; actions: one row per dataset with what is held and what you need to do.'),
+       [('Status & actions','status.html','')]),
+      ('Review quarantined files',
+       block('Where',f'<p>Files transferred under a technical exception (no provider checksum, unknown size) wait on {L("Quarantine","quarantine.html")}. Tick the deliveries to release into the holdings or duplicates to discard, and save the request; the agent applies it:</p>'
+            +cmd('.venv/bin/python Scripts/review_quarantine.py --request <saved request> --apply'))
+       +block('Good to know','<p>Without <code>--apply</code> the request is only validated. A changed or unexplained file is never released automatically, and a release grants no AI use.</p>')
+       +fig('12-quarantine','The Quarantine page','Quarantine: every staged file with its run, dataset and state.'),
+       [('Quarantine','quarantine.html','')])]),
+     ('Part 4 · Know what is in the data','Data Hunter reads every held table and reports its real structure, so you and your collaborators can decide what to use before anyone writes code.',[
+      ('Read the data structure report',
+       block('Where',f'<p>{L("Data structure","structure.html")} is rebuilt automatically whenever the catalogue is refreshed after a download. For each held dataset it shows:</p>'
+            +ul('<strong>Held</strong>: verified files and size, tables profiled, rows and columns in total.',
+                '<strong>Composition</strong>: files, size, tables and formats per folder, so you see how the release is organised.',
+                '<strong>Tables, column by column</strong>: rows and columns, then per column the type, how many values and how much is missing, distinct values and a summary (range and median for numbers, first and last time for dates, the most common labels for codes and units).',
+                'Tables with identical columns, such as one file per patient, are combined into one entry; the entry says when the same files are held more than once.'))
+       +block('What it reads','<p>CSV and other delimited text (also compressed and inside zip archives), Excel workbooks sheet by sheet, Parquet, SAS transport (<code>.xpt</code>) and JSON tables. Files it cannot profile are listed with the reason. Profiling is deterministic and local: no data leave your computer and no model is called.</p>')
+       +fig('13-structure','The top of the data structure page','Data structure: the summary at the top, then one section per held dataset.')
+       +fig('14-structure-dataset','The composition tables of three MIMIC-IV demo releases','Composition per folder for three releases of the MIMIC-IV demo (PhysioNet, ODbL 1.0).')
+       +fig('14b-structure-table','The column-by-column profile of the MIMIC-IV demo lab events table','One table column by column: types, completeness, distinct values and summaries. The unit column lists the units actually used (MIMIC-IV Clinical Database Demo 2.2, PhysioNet, ODbL 1.0).'),
+       [('Data structure','structure.html','')]),
+      ('Share the reports with a collaborator',
+       block('What you get',ul('<code>docs/DATASET_VARIABLES.csv</code> in the study folder: the variable dictionary, one row per column of every held table, ready for a spreadsheet.',
+            'Dated copies for the study’s report list, made by the agent with:'
+            +cmd('.venv/bin/python Scripts/report_dataset_structure.py --report','.venv/bin/python Scripts/report_dataset_status.py --report')
+            +'They land in <code>studies/&lt;id&gt;/reports/</code> as <code>dataset-structure-&lt;date&gt;.md</code>, <code>dataset-variables-&lt;date&gt;.csv</code> and <code>dataset-status-&lt;date&gt;.md</code>, and appear under Reports on the Research studies page.'))
+       +block('Good to know','<p>The reports are derived from the data, so sharing them falls under each dataset’s terms. Check the licence of every dataset you include before sending the files outside your project.</p>'),
+       [('Data structure','structure.html',''),('Status & actions','status.html','')])]),
+     ('Part 5 · Combine studies','Run several studies, then merge them into one project study that knows every dataset found, what is held, and what still has to be obtained.',[
+      ('Merge studies into a new study',
+       block('What you do',f'<p>On {L("Research studies","research-studies.html","#your-studies")}:</p>'
+            +ul('In <strong>Your studies</strong>, tick the studies to merge. Order matters: where two studies describe the same dataset differently, the first ticked study wins and the difference is reported.',
+                'In <strong>Merge studies into a new study</strong>, give the new study its own ID, name, research question and intended use. The other fields are prefilled from the ticked studies; edit them to the combined project.',
+                '<strong>Preview what crosses over</strong> asks the local server what each study would bring: catalogue entries, papers, licence records, notices, and the datasets and licences the studies share.',
+                'Tick that you reviewed the preview and <strong>Save merge request</strong>.'))
+       +block('Hand it to the agent','<p>Give the saved file to the agent, which creates and registers the study, merges the facts in order and builds its catalogue, status page and site:</p>'
+            +cmd('.venv/bin/python Scripts/merge_study_facts.py --request <saved file> --apply'))
+       +block('What crosses over and what does not',ul('Crosses: catalogue entries (as not yet obtained), paper records, selection placements, terms screens, retained notices, and licence records with every AI operation set back to unreviewed.',
+            'Never crosses: briefs, shortlists, annotations, held files, approvals and licence decisions. The merged study decides its own permissions.'))
+       +fig('15-your-studies','The list of studies with two ticked for merging','Your studies: two studies ticked for a merge, with their held files and reports.')
+       +fig('16-merge','The merge form with the preview of what each study brings','The merge form after <strong>Preview what crosses over</strong>: what each study brings and which datasets and licences they share.'),
+       [('Research studies','research-studies.html','#merge-facts')]),
+      ('Bring the held files into the merged study',
+       block('What you do',f'<p>Switch the header’s <strong>Study</strong> picker to the merged study, open its {L("Dataset explorer","catalogue.html")}, tick the datasets you want and prepare a download as in step 8 with <strong>Reuse files another study already holds</strong> ticked. Files the other studies hold are copied and re-verified; anything not held anywhere is downloaded; the rest appears on Status &amp; actions with the step it needs.</p>'
+            +'<p>To copy only what the other studies hold and download nothing, ask the agent for a copy-only run:</p>'+cmd('.venv/bin/python Scripts/resolve_full_release.py --instructions <saved file> --execute --reuse-only'))
+       +block('Good to know',ul('Tick the same technical exceptions the original studies used (for example “no published provider checksum” for releases that publish none), otherwise those datasets wait for your acknowledgement.',
+            'Licence decisions are never copied: record them again for the merged study’s purpose (step 7) before any AI use.',
+            'Then read the merged study’s Status &amp; actions for what is still missing and Data structure for what the combined data contain.')),
+       [('Dataset explorer','catalogue.html',''),('Status & actions','status.html','')])]),
+     ('Part 6 · Keep the record','Make the study durable, keep its files tidy and leave a trail of what was decided and done.',[
+      ('Work with held files',
+       block('What you do','<p>For ticked datasets with held files, <strong>More actions</strong> in the explorer offers verify files, copy files, prepare workflow inputs, plan a move and plan a removal, plus a file-inventory export. Each saves a CSV task for the agent (<code>agents/dataset-operations-agent.md</code>).</p>')
+       +block('Good to know','<p>Moves and removals are plans only: the agent shows the concrete file list and asks for your confirmation before changing anything.</p>'),
+       [('Dataset explorer','catalogue.html','')]),
+      ('Export and register the study',
+       block('What you do',f'<p>On {L("Research studies","research-studies.html")}, <strong>Export study, shortlist &amp; annotations</strong> saves a JSON file. Give it to the agent to register:</p>'
+            +cmd('.venv/bin/python Scripts/register_research_study.py --request /path/to/study.json --apply'))
+       +block('What happens',ul('Registration makes the brief, shortlist and annotations durable, appends this browser’s actions to the study’s log, and makes it the active study. Register early and again after each round of changes.',
+            'Reports and the action log appear on the Research studies page; the log lists every registration, search, licence decision, download and file operation.',
+            'Registration grants no data permissions either; it records what was decided and done. To retire a study, use <code>Scripts/register_research_study.py --remove STUDY_ID --apply</code>; its reports and log are kept.'))
+       +fig('17-reports','Reports and the action log on the Research studies page','Reports &amp; action log: dated reports first, then every recorded action, newest first.'),
+       [('Research studies','research-studies.html','')])])]
+    count=sum(len(steps) for _,_,steps in parts)
+    body=hero('Tutorial · step by step','How to use '+TOOL_NAME,f'{count} steps in six parts, from a research question to verified data files and reports your collaborators can read. Each step says where it happens, what to do and what comes back, with a screenshot from a real study.')
+    contents=''
+    n=0
+    for title,_,steps in parts:
+        items=''
+        for step in steps:
+            n+=1;items+=f'<li><a href="#step-{n}">{n}. {e(step[0])}</a></li>'
+        contents+=f'<li><strong>{e(title)}</strong><ol class="tutorialtoc">{items}</ol></li>'
+    body+=section('before-you-start','Before you start',
+        ul('<strong>Start the site.</strong> In a terminal in the repository run the command below and open <code>http://127.0.0.1:8767/</code>. The server is needed for Activity and the merge preview; the other pages also open as files.'+cmd('.venv/bin/python Scripts/serve.py'),
+           '<strong>Open an agent in the same repository.</strong> Claude Code or Codex carries out every step that changes something. The site prepares a prompt, CSV or JSON file; you give it to the agent; the agent runs the named script under the reviewed definitions in <code>agents/</code>; the site is rebuilt from the result.',
+           '<strong>Nothing in your browser downloads data or grants permission.</strong> Ticks, forms and drafts stay in this browser until you hand a file to the agent.',
+           '<strong>Switch studies</strong> with the header’s Study picker, or in a terminal with <code>Scripts/study.py use STUDY_ID</code>; <code>Scripts/study.py list</code> lists them.')
+        +'<h3>Words used on every page</h3><dl class="facts tutorialglossary">'
+        +''.join(f'<dt>{e(k)}</dt><dd>{v}</dd>' for k,v in [
+            ('Study','One research question with its own brief, shortlist, annotations, licence decisions, reports and action log, in <code>studies/&lt;id&gt;/</code>.'),
+            ('Catalogue','Every dataset the study knows, with its evidence, access route and holdings.'),
+            ('Held files','Files downloaded, verified against their checksum and recorded in the study’s lock. Holding a file is not permission to use it.'),
+            ('Licence record','A registered reading of a dataset’s terms for one study, with each AI operation decided separately: allowed, prohibited or unreviewed.'),
+            ('Lenient / Strict','How AI use is judged. Lenient: allowed unless the terms explicitly ban it, provided the underlying rights exist. Strict: only with explicit AI approval.'),
+            ('Rights-unresolved','Held because you asked for open-access files without a licence decision; blocked for AI use until you record one.'),
+            ('Quarantine','A holding area for files transferred under a technical exception, released only after your review.'),
+            ('AI preflight','The check that runs before any inference or embedding on a dataset, against the study’s licence records.')])
+        +'</dl>')
+    body+=section('contents','Contents','<ol class="tutorialparts">'+contents+'</ol>')
     body+=section('schema','How the pieces fit together',para('Everything on the left happens in your browser and changes nothing outside it. Each hand-off in the middle is a prompt, CSV or JSON you give to Claude Code or Codex, which works under the reviewed agent definitions and writes only to the registries and holdings on the right. This site is then rebuilt from those records.')+workflow_schema()
                  +'<p class="small">Boxes are the pages and files named in the steps below. Arrows carry data, not permissions: no step grants data or AI-use rights.</p>')
-    body+='<ol class="tutorial">'
-    for i,(title,points,links) in enumerate(steps,1):
-        body+=(f'<li class="panel tutorialstep" id="step-{i}"><span class="stepnumber" aria-hidden="true">{i}</span><div><h2>{e(title)}</h2>'
-               +''.join(f'<p>{p}</p>' for p in points)
-               +'<div class="pilllinks">'+''.join(L(text,name,frag) for text,name,frag in links)+'</div></div></li>')
-    body+='</ol>'
+    n=0
+    for title,intro,steps in parts:
+        body+=f'<h2 class="tutorialpart">{e(title)}</h2><p class="tutorialintro">{e(intro)}</p><ol class="tutorial" start="{n+1}">'
+        for step_title,content,links in steps:
+            n+=1
+            body+=(f'<li class="panel tutorialstep" id="step-{n}"><span class="stepnumber" aria-hidden="true">{n}</span><div><h2>{e(step_title)}</h2>{content}'
+                   +'<div class="pilllinks">'+''.join(L(text,name,frag) for text,name,frag in links)+'</div></div></li>')
+        body+='</ol>'
+    body+=section('questions','Common questions',ul(
+        '<strong>Why is a dataset PARTIAL?</strong> Part of the release is held and the rest needs something: a licence record, a technical acknowledgement, a source without an automated route, or a rerun after a provider error. The status row names it.',
+        '<strong>Why does a merged study hold fewer files than the studies it came from?</strong> A merge copies facts, not files. Prepare a download in the merged study with “Reuse files another study already holds” (step 15).',
+        '<strong>Why must I decide a licence again in a new study?</strong> Permission is bound to a study’s purpose; another study’s decision may not fit yours.',
+        '<strong>A long download stopped.</strong> Usually the computer slept or a provider was briefly unavailable. Run the same instructions again with <code>--datasets</code> for the affected datasets; held files are skipped.',
+        '<strong>Can I delete a study?</strong> A browser draft is deleted on the Research studies page. A registered study is retired with <code>--remove</code> (step 17), which keeps its reports and log.'))
     body+=section('never','What this site never does',para('The home page lists what the site never does: no network requests or model calls, no permissions granted, no downloads and no clinical certification. '+L('Read it there','index.html','#how-it-works')+'.'))
     return shell(page,'Tutorial',body,'Tutorial')
 
@@ -1084,6 +1229,8 @@ def build():
     SNAPSHOT=datetime.fromisoformat(REPORT['generated_at']).astimezone(ZoneInfo('Europe/Copenhagen')).strftime('%d %b %Y · %H:%M %Z')
     OUT.mkdir(parents=True,exist_ok=True);(OUT/'assets').mkdir(exist_ok=True)
     for name in ASSET_FILES:shutil.copyfile(ASSETS/name,OUT/'assets'/name)
+    (OUT/'assets'/'tutorial').mkdir(exist_ok=True)
+    for shot in tutorial_images():shutil.copyfile(shot,OUT/'assets'/'tutorial'/shot.name)
     pages={OUT/'index.html':home_page(records,validation),OUT/'catalogue.html':explorer_page(records,validation,{'records':selection_metadata,'facets':FACETS,'context':AGENT_CONTEXT}),OUT/'downloads.html':downloads_page(),OUT/'add-datasets.html':intake_page(),OUT/'research-studies.html':shell(OUT/'research-studies.html','Research studies',hero('Research projects · separate briefs · shared evidence','Your research studies','Switch research questions, keep separate dataset searches and shortlists, and annotate relevant papers and datasets.')+study_projects()+merge_panel(),'Research studies',scripts=['merge_ui.js']),OUT/'studies.html':studies_page(records,usage,policy),OUT/'methods.html':methods_page(records,validation,selection_path),OUT/'tutorial.html':tutorial_page(),OUT/'cite.html':cite_page()}
     for name,title,kicker,description,source,active in [
         ('actions.html','Priorities & access','Preparation · acquisition · registration','The maintained action plan, including missing components, minimal requests and all registration/owner routes. P2 sources remain conditional alternatives.','DATASET_ACTION_PRIORITIES.md','Priorities & access'),
@@ -1106,13 +1253,14 @@ def build():
     if not manifest_path.exists():manifest_path.write_text('{}\n')
     check_links(pages)
     for path,html in pages.items():path.parent.mkdir(exist_ok=True);path.write_text(html+'\n')
-    files=[str(p.relative_to(OUT)) for p in pages]+['assets/'+name for name in ASSET_FILES]+[str(p.relative_to(OUT)) for p in sorted(PUBLIC_NOTICE_FILES)]
+    files=[str(p.relative_to(OUT)) for p in pages]+['assets/'+name for name in ASSET_FILES]+['assets/tutorial/'+shot.name for shot in tutorial_images()]+[str(p.relative_to(OUT)) for p in sorted(PUBLIC_NOTICE_FILES)]
     for relative in set(old.get('files',[]))-set(files):
         stale=(OUT/relative).resolve()
         notice=relative.startswith('license-notices/') and re.fullmatch(r'[0-9a-f]{64}\.txt',stale.name)
-        if not stale.is_relative_to(OUT) or (stale.suffix not in {'.html','.css','.js'} and not notice):raise ValueError('unsafe_generated_cleanup')
+        shot=relative.startswith('assets/tutorial/') and stale.suffix=='.png'
+        if not stale.is_relative_to(OUT) or (stale.suffix not in {'.html','.css','.js'} and not notice and not shot):raise ValueError('unsafe_generated_cleanup')
         stale.unlink(missing_ok=True)
-    sources=[receipt_path,selection_path,validation_path,ROOT/'configs/dataset_selection.json',ROOT/'configs/dataset_study_usage.json',ROOT/'configs/data_licenses.json',ROOT/'docs/DATASET_ACTION_PRIORITIES.md',ROOT/'docs/DATA_LICENSES_AND_AI_USE.md',*[p for p in [ROOT/'docs/DATASET_STATUS.md',ROOT/'docs/DATASET_STRUCTURE.md',ROOT/'data/interim/quarantine_review/latest.json'] if p.exists()],Path(__file__),ASSETS/'filter_metadata.py',ASSETS/'filter_help.json',ASSETS/'license_review.py',ASSETS/'study_pages.py',ROOT/'configs/research_studies.json',CODE_ROOT/'src/datahunter/research_studies.py',ROOT/'configs/dataset_license_reviews.json',ROOT/'configs/data_license_assets.json',CODE_ROOT/'agents/dataset-license-review-agent.md']+[ASSETS/name for name in ASSET_FILES]
+    sources=[receipt_path,selection_path,validation_path,ROOT/'configs/dataset_selection.json',ROOT/'configs/dataset_study_usage.json',ROOT/'configs/data_licenses.json',ROOT/'docs/DATASET_ACTION_PRIORITIES.md',ROOT/'docs/DATA_LICENSES_AND_AI_USE.md',*[p for p in [ROOT/'docs/DATASET_STATUS.md',ROOT/'docs/DATASET_STRUCTURE.md',ROOT/'data/interim/quarantine_review/latest.json'] if p.exists()],Path(__file__),ASSETS/'filter_metadata.py',ASSETS/'filter_help.json',ASSETS/'license_review.py',ASSETS/'study_pages.py',ROOT/'configs/research_studies.json',CODE_ROOT/'src/datahunter/research_studies.py',ROOT/'configs/dataset_license_reviews.json',ROOT/'configs/data_license_assets.json',CODE_ROOT/'agents/dataset-license-review-agent.md']+[ASSETS/name for name in ASSET_FILES]+tutorial_images()
     if LINK_CONFIG.exists():sources.append(LINK_CONFIG)
     if links.get('evidence') and (ROOT/links['evidence']).exists():sources.append(ROOT/links['evidence'])
     sources.extend([CODE_ROOT/'Scripts/acquire_research_resources.py',CODE_ROOT/'Scripts/run_download_agent.py',CODE_ROOT/'agents/dataset-download-agent.md',CODE_ROOT/'agents/dataset-operations-agent.md',CODE_ROOT/'agents/dataset-intake-agent.md',CODE_ROOT/'Scripts/run_dataset_intake_agent.py',ROOT/'configs/dataset_download_reviews.json',ROOT/'configs/research_resources.json'])

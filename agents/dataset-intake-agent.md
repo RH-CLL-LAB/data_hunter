@@ -107,7 +107,9 @@ instruction or permission to expand another dataset.
    is recorded with `copied_from`, and this study's own approval and licence gates still decide;
    nothing about the other study's rights carries over). The download dialog's tick “Reuse files another
    study already holds” saves the same as `reuse_held_files: true`: the resolver then reuses every other
-   study workspace of this checkout that holds verified files. `--datasets ID…` restricts a retry to
+   study workspace of this checkout that holds verified files. `--reuse-only` copies only what other
+   studies hold and asks the provider for no bytes; the rest of each release stays unregistered and the
+   dataset partial, with the count shown on the Status page. `--datasets ID…` restricts a retry to
    named datasets while the others keep their reservations against the total cap.
    `--import-from ID=FOLDER` takes a release the user obtained themselves (after credentialing, an
    agreement, or from a provider without an automated route): the folder stands in for the provider

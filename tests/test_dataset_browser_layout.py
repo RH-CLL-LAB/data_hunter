@@ -142,8 +142,9 @@ class ExplorerLayoutTests(unittest.TestCase):
         self.assertIn('data-help="help-download-dialog"',self.html,'the download dialog explains itself')
 
     def test_published_assets_match_their_source_and_pages_load_nothing_external(self):
-        for published in sorted((SITE/'assets').iterdir()):
-            self.assertEqual(published.read_bytes(),(SOURCE/published.name).read_bytes(),published.name)
+        for published in sorted(p for p in (SITE/'assets').rglob('*') if p.is_file()):  # tutorial screenshots sit in assets/tutorial/
+            relative=published.relative_to(SITE/'assets')
+            self.assertEqual(published.read_bytes(),(SOURCE/relative).read_bytes(),str(relative))
         for page in SITE.rglob('*.html'):
             html,elements=parse(page)
             for tag,a in elements:
@@ -157,12 +158,16 @@ class ExplorerLayoutTests(unittest.TestCase):
         self.assertEqual(steps,[str(i) for i in range(1,len(steps)+1)]);self.assertGreaterEqual(len(steps),8)
         for needle in ['research-studies.html','catalogue.html','add-datasets.html','downloads.html','studies.html','register_research_study.py']:self.assertIn(needle,html)
         self.assertIn('grants no data',html)
+        for needle in ['resolve_full_release.py','merge_study_facts.py','structure.html','status.html','--import-from','Merge studies into a new study','id="before-you-start"']:self.assertIn(needle,html)
+        shots=re.findall(r'<img src="(assets/tutorial/[^"?]+)\?v=[0-9a-f]{12}" alt="[^"]+"',html)
+        self.assertGreaterEqual(len(shots),10,'the walk-through shows the pages it describes')
+        for shot in shots:self.assertTrue((SITE/shot).is_file(),shot)
         self.assertIn('<svg class="schema"',html);self.assertIn('role="img"',html)
         for lane in ['In your browser','Hand-off · Claude Code or Codex','In the repository']:self.assertIn(lane,html)
         for page in SITE.rglob('*.html'):
             text=page.read_text();self.assertIn('· Data Hunter</title>',text,page);self.assertNotIn('<span>MedScrape Dataset Explorer</span>',text,page)
         # The walk-through starts with a new study and its dataset search, before the catalogue.
-        order=[html.index(t) for t in ['Create a research study','Search for datasets for the study','Explore the catalogue','Export and register the study']]
+        order=[html.index(t) for t in ['Create a research study','Search for datasets for the study','Explore the catalogue','Prepare a download','Read the data structure report','Merge studies into a new study','Export and register the study']]
         self.assertEqual(order,sorted(order))
         mainnav=re.search(r'<nav class="wrap mainnav".*?</nav>',self.html,re.S).group(0)
         nav=[n.split('?')[0] for n in re.findall(r'href="([^"]+)"',mainnav)]

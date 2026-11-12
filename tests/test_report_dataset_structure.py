@@ -458,7 +458,8 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(held['others'], {'.txt': 2}, 'a README and prose stay text')
         entries = module.families_of(held, module.DEFAULTS)
         family = next(e for e in entries if e['family'])
-        self.assertEqual((len(family['names']), family['rows'], dict(family['folders'])), (3, 7, {'data/acquisitions/datasets/held/set-a': 3}))
+        self.assertEqual((len(family['names']), family['rows'], dict(family['folders']), family['distinct_names']), (3, 7, {'set-a': 3}, 3))
+        self.assertEqual(family['names'][0], 'set-a/1001.txt', 'names are relative to the release folder')
         merged = {c['name']: c for c in family['columns']}
         self.assertEqual((merged['Value']['values'], merged['Value']['numeric']['min'], merged['Value']['numeric']['max']), (7, 37.2, 90.0))
         self.assertEqual(merged['Parameter']['labels'], [{'value': 'HR', 'count': 3}, {'value': 'Age', 'count': 3}, {'value': 'Temp', 'count': 1}], 'complete label lists merge exactly')
@@ -468,6 +469,25 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual([(r['column'], r['tables_with_these_columns']) for r in rows if r['format'] == 'delimited text' and r['tables_with_these_columns'] == '3'],
                          [('Time', '3'), ('Parameter', '3'), ('Value', '3')], 'the dictionary lists a family once')
         self.assertEqual(len(rows), 6)
+
+    def test_copies_of_the_same_files_are_named_and_rendering_changes_keep_the_profiles(self):
+        files = {f'set-a/{i}.txt': f'Time,Parameter,Value\n00:00,Age,{50 + i}\n00:10,HR,{70 + i}\n' for i in range(3)}
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w') as z:
+            for name, text in files.items():
+                z.writestr(name, text)
+        held = self.held({**files, 'set-a.zip': archive.getvalue()})
+        [family] = [e for e in module.families_of(held, module.DEFAULTS) if e['family']]
+        self.assertEqual((len(family['names']), family['distinct_names'], dict(family['folders'])), (6, 3, {'set-a': 3, 'set-a.zip → set-a': 3}))
+        text = module.write_document(self.root)[0].read_text()
+        self.assertIn('only 3 distinct file names: the same files appear in several folders or archives', text)
+        self.assertIn("`set-a.zip → set-a` (3)", text)
+        source = Path(module.__file__).read_text()
+        marker = source.index(module.PROFILE_CODE_END)
+        self.assertGreater(source.index('def render_dataset('), marker, 'page code sits below the marker')
+        self.assertLess(source.index('def profile_artifact('), marker, 'profiling code sits above the marker')
+        with patch.object(module.Path, 'read_text', lambda self, *a, **k: source[:marker] + source[marker:].replace('distinct file names', 'distinct names')):
+            self.assertEqual(module.code_identity(), hashlib.sha256(source[:marker].encode()).hexdigest(), 'a change below the marker keeps the identity')
 
     def test_archive_metadata_is_ignored_and_large_members_are_streamed(self):
         archive = io.BytesIO()
@@ -499,6 +519,22 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(next(d for d in first['datasets'] if d['id'] == 'HELD')['tables'], 2)
         _, second = module.write_document(self.root, {'max_tables': 2})
         self.assertEqual(second['reused_artifacts'], 0, 'the cut profile depends on the budget left, so it is profiled again')
+        _, third = module.write_document(self.root, {'max_tables': 5, 'rendered_tables': 7})
+        self.assertEqual((third['reused_artifacts'], next(d for d in third['datasets'] if d['id'] == 'HELD')['tables']), (0, 3))
+        _, fourth = module.write_document(self.root, {'max_tables': 50, 'rendered_columns': 9})
+        self.assertEqual(fourth['reused_artifacts'], 1, 'an uncut profile does not depend on the table budget or the rendering options')
+        _, fifth = module.write_document(self.root, {'max_tables': 50, 'label_levels': 3})
+        self.assertEqual(fifth['reused_artifacts'], 0, 'the label limit changes the profile itself')
+
+    def test_a_workbook_cut_by_the_table_budget_records_the_cut(self):
+        buffer = self.root.parent / (self.root.name + '-two-sheets.xlsx')
+        self.addCleanup(buffer.unlink, True)
+        xlsx_file(buffer)
+        with zipfile.ZipFile(buffer, 'a') as book:
+            book.writestr('xl/worksheets/sheet2.xml', f'<worksheet {MAIN}><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>x</t></is></c></row>'
+                                                      '<row r="2"><c r="A2"><v>1</v></c></row></sheetData></worksheet>')
+        held = self.held({'book.xlsx': buffer.read_bytes()}, max_tables=1)
+        self.assertEqual((held['tables'], [s['reason'] for s in held['skipped']]), (1, ['table_budget_for_dataset']))
 
 
 

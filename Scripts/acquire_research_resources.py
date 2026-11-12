@@ -316,7 +316,7 @@ def holdings_of(workspaces):
     return sources
 
 
-def acquire(item, locked, base=BASE, *, execute=False, journal=None, license_context=None, allow_unresolved_rights=False, reuse=None):
+def acquire(item, locked, base=BASE, *, execute=False, journal=None, license_context=None, allow_unresolved_rights=False, reuse=None, reuse_only=False):
     if item.get('acquisition') != 'direct':
         return {'id': item['id'], 'state': item['acquisition'], 'reason': item['reason']}
     path = contained(base, item['path'])
@@ -370,6 +370,8 @@ def acquire(item, locked, base=BASE, *, execute=False, journal=None, license_con
             partial.unlink()
             if journal:
                 journal('reuse_rejected', {'id': item['id'], 'source': source.get('study') or source.get('folder'), 'reason': 'bytes_differ_from_the_source; downloading instead'})
+    if reuse_only and copied is None:  # a copy-only run never asks the provider for bytes, not even when the other study's copy fails its check
+        raise ValueError('copy_only_run_has_no_verified_copy_to_reuse: ' + item['id'])
     command = ['curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https', '--proto-redir', '=https',
                '--connect-timeout', '20', '--speed-time', '120', '--speed-limit', '1024',  # a connection stalled below 1 KB/s for two minutes fails; a slow provider may take as long as a full release needs
                '--max-filesize', str(item.get('max_bytes', 64 * 1024**2)), '--output', str(partial), item['url']]
@@ -430,11 +432,13 @@ def main():
         if not target.exists():
             target.write_bytes(source.read_bytes())
     journal_lock = threading.Lock()
+    # The run's inputs do not change while it runs: hash them once (the review file of a large study is ~1 GB,
+    # and hashing it for every journal event made an inventory of 25,000 files take hours).
+    run_digests = {'manifest_sha256': digest(MANIFEST), 'script_sha256': digest(Path(__file__)),
+                   'download_review_sha256': digest(ROOT / 'configs/dataset_download_reviews.json'),
+                   'common_code_sha256': digest(CODE_ROOT / 'Scripts/public_resources.py')}
     def journal(kind, details):
-        event = {'at': now(), 'kind': kind, 'details': details,
-                 'manifest_sha256': digest(MANIFEST), 'script_sha256': digest(Path(__file__)),
-                 'download_review_sha256': digest(ROOT / 'configs/dataset_download_reviews.json'),
-                 'common_code_sha256': digest(CODE_ROOT / 'Scripts/public_resources.py')}
+        event = {'at': now(), 'kind': kind, 'details': details, **run_digests}
         with journal_lock:
             with (BASE / 'operations.jsonl').open('a') as stream:
                 stream.write(json.dumps(event, sort_keys=True) + '\n')
@@ -449,10 +453,11 @@ def main():
         for future in as_completed(futures):
             item, result = futures[future], future.result()
             if result['state'] == 'downloaded_verified':
-                locked[item['id']] = {k: v for k, v in result.items() if k not in {'state', 'inspection'}}
-                # Persist each successful identity immediately, before moving on.
-                write_json(LOCK, {'schema_version': 1, 'scope': manifest['scope'],
-                                  'files': list(locked.values())})
+                record = {k: v for k, v in result.items() if k not in {'state', 'inspection'}}
+                if locked.get(item['id']) != record:  # persist each new or changed identity immediately; a re-verified file changes nothing
+                    locked[item['id']] = record
+                    write_json(LOCK, {'schema_version': 1, 'scope': manifest['scope'],
+                                      'files': list(locked.values())})
             results[item['id']] = result
             journal('acquisition_outcome', result)
             print(item['id'], result['state'], flush=True)

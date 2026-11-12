@@ -121,6 +121,19 @@ class StatusReportTests(unittest.TestCase):
         self.assertNotIn('| CRED | 0 |', text.split('## Open-access data not held')[1].split('## Obtained automatically')[0], 'registration routes are not open-access gaps')
         self.assertNotIn('| OPEN_DONE |', text.split('## Open-access data not held')[1].split('## Obtained automatically')[0])
 
+    def test_saving_a_report_leaves_the_active_study_pointer_as_it_was(self):
+        doc, rows, counts = module.write_document(self.root)
+        sys.path.insert(0, str(CODE_ROOT / 'Scripts'))
+        import register_research_study
+        from datahunter import workspace
+        pointer = self.root / 'active-pointer'
+        pointer.write_text('another-study\n')
+        switch = lambda study_id: pointer.write_text(study_id + '\n')  # noqa: E731
+        with patch.object(workspace, 'ACTIVE', pointer), patch.object(register_research_study, 'set_active', switch), patch.object(workspace, 'set_active', switch), \
+                patch.dict('os.environ', {'DATA_HUNTER_STUDY': 'demo-study'}):
+            module.save_report(self.root, doc)
+        self.assertEqual(pointer.read_text(), 'another-study\n', 'a run targeted with DATA_HUNTER_STUDY restores the pointer the user chose')
+
     def test_dated_report_is_tracked_and_registered_with_the_study(self):
         doc, rows, counts = module.write_document(self.root)
         sys.path.insert(0, str(CODE_ROOT / 'Scripts'))

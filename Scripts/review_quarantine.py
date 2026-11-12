@@ -197,6 +197,12 @@ def refresh_dataset_entries(root, dataset_ids):
             missing.append(f"{full['unacknowledged_files']} release files need a technical-risk acknowledgement (no provider checksum or size).")
         if full.get('unsupported_sources'):
             missing.append(f"{len(full['unsupported_sources'])} source URLs have no supported route: " + ', '.join(full['unsupported_sources']) + '.')
+        if full.get('unresolved_sources'):
+            missing.append(f"{len(full['unresolved_sources'])} sources did not resolve in the last run ("
+                           + '; '.join(f"{u['source']}: {u['reason']}" for u in full['unresolved_sources'])
+                           + "); run resolve_full_release.py again for this dataset to complete the release.")
+        if full.get('not_held_elsewhere_files'):
+            missing.append(f"{full['not_held_elsewhere_files']} release files are held by no other study and were not transferred by the copy-only run; a normal run downloads them.")
         if pending:
             missing.append(f"{len(pending)} registered files are not held yet (quarantined pending release, or failed transfer).")
         # Release files held: what the last resolution found held anywhere (this dataset's folder or another's, e.g. an OpenML

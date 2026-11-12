@@ -68,6 +68,11 @@ CHECKS = ['clinical_content', 'subject_and_grain', 'value_units_codes', 'time_se
 ROUTE_BLOCKS = ('registration', 'no_public_access_route')
 
 
+def size_cap(advertised):
+    """A job's transfer cap from the provider's advertised size; the acquisition gate classifies by this cap."""
+    return int(advertised * 1.2) + 4096
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -364,7 +369,10 @@ RESOLVERS = {'physionet': resolve_physionet, 'zenodo': resolve_zenodo, 'github':
 
 
 def resolve_all(targets, unsupported, evidence):
-    """Resolve every supported source of a dataset; files carry their component folder, unsupported sources stay listed."""
+    """Resolve every supported source of a dataset; files carry their component folder, unsupported sources stay listed.
+
+    A source that fails (a provider error or the GitHub rate limit) while others resolve is listed in `unresolved_sources`:
+    the release is then partial, never labelled complete from the sources that happened to answer."""
     components = []
     for target in targets:
         try:
@@ -377,6 +385,7 @@ def resolve_all(targets, unsupported, evidence):
     return {'components': [{k: v for k, v in c.items() if k != 'files'} for c in components], 'files': files, 'unsupported_urls': unsupported,
             'release': '; '.join(c['release'] for c in resolved) or None, 'manifest': '; '.join(c['manifest'] for c in resolved) or None,
             'licence_label': {c['target'].get('source'): c.get('licence_label') for c in resolved if c.get('licence_label') is not None},
+            'unresolved_sources': [{'source': c['target'].get('source'), 'reason': c['blocked']} for c in components if c.get('blocked')] if resolved else [],
             'blocked': None if resolved else (components[0]['blocked'] if components else 'unsupported_provider_manual_route')}
 
 
@@ -542,7 +551,7 @@ def plan_dataset(d, resolution, spec, registry, manifest_paths, held, acknowledg
         if ('path', path) in held or ('url', f['url']) in held:
             held_count += 1
             continue
-        job = {'id': f"{slug(f.get('folder') or resolution.get('folder'))}_{slug(f['path'])}", 'kind': 'repository_source' if reference and type(f.get('bytes')) is int and f['bytes'] <= REFERENCE_LIMIT else 'dataset',
+        job = {'id': f"{slug(f.get('folder') or resolution.get('folder'))}_{slug(f['path'])}", 'kind': 'repository_source' if reference and type(f.get('bytes')) is int and size_cap(f['bytes']) <= REFERENCE_LIMIT else 'dataset',
                'acquisition': 'direct', 'url': f['url'], 'path': path, 'format': f['format'],
                'workflow_use': f"Complete provider release of {d['id']} ({resolution['release']}), requested as a full release."}
         for key in ('provider_sha256', 'provider_md5', 'git_blob_sha1'):
@@ -553,7 +562,7 @@ def plan_dataset(d, resolution, spec, registry, manifest_paths, held, acknowledg
             job_risks.append('missing_provider_checksum')
         if type(f.get('bytes')) is int:
             job['expected_bytes'] = f['bytes']
-            job['max_bytes'] = int(f['bytes'] * 1.2) + 4096
+            job['max_bytes'] = size_cap(f['bytes'])
         else:
             job_risks.append('unknown_advertised_size')
             job['max_bytes'] = spec['max_bytes_per_artifact']
@@ -593,7 +602,8 @@ def plan_dataset(d, resolution, spec, registry, manifest_paths, held, acknowledg
             blockers.append('blocked_license_binding_missing')
         if unacknowledged:
             blockers.append('needs_technical_risk_acknowledgement')
-    complete = not unbound and not unacknowledged and not unsupported
+    failed = resolution.get('unresolved_sources', [])  # a source that did not answer this run: its files are unknown, so the release is not complete
+    complete = not unbound and not unacknowledged and not unsupported and not failed
     if blockers:
         outcome = blockers[0]
     elif not jobs:
@@ -603,7 +613,22 @@ def plan_dataset(d, resolution, spec, registry, manifest_paths, held, acknowledg
     return {'outcome': outcome, 'blockers': blockers, 'jobs': jobs, 'held': held_count, 'release_files': len(seen), 'package_budget': package, 'risks': dict(risks), 'unaccepted': unaccepted,
             'bindings': sorted({b for j in jobs for b in j['download_license_resources']}), 'unbound_files': len(unbound), 'unbound_sample': [j['path'] for j in unbound[:10]],
             'unacknowledged_files': len(unacknowledged), 'unacknowledged_sample': [j['path'] for j in unacknowledged[:10]], 'rights_unresolved_files': unresolved, 'unknown_size_files': len(unknown_size),
-            'unsupported_urls': unsupported, 'reference_release': reference, 'complete_release_registrable': complete}
+            'unsupported_urls': unsupported, 'unresolved_sources': failed, 'reference_release': reference, 'complete_release_registrable': complete}
+
+
+def copy_only(plan, sources):
+    """Keep only the jobs whose bytes another study already holds (`sources`: URL -> holding): a copy-only run transfers
+    nothing from the provider. The other release files stay unregistered and counted, so the dataset is partial, never complete."""
+    keep = [j for j in plan['jobs'] if j['url'] in sources]
+    dropped = len(plan['jobs']) - len(keep)
+    if not dropped:
+        return plan
+    return {**plan, 'jobs': keep, 'not_held_elsewhere_files': dropped, 'complete_release_registrable': False,
+            'outcome': 'ready_partial' if keep else 'held_part_complete_rest_unbound_or_unsupported',
+            'package_budget': sum(j['max_bytes'] for j in keep if 'expected_bytes' in j),
+            'bindings': sorted({b for j in keep for b in j['download_license_resources']}),
+            'risks': dict(Counter(r for j in keep for r in j['technical_risks'])),
+            'rights_unresolved_files': sum(1 for j in keep if j.get('rights_unresolved'))}
 
 
 # ----------------------------------------------------------------------------------------------- registration
@@ -638,7 +663,10 @@ def register(root, d, resolution, plan, evidence_items, licence_evidence, run_na
         approvals.append(approval)
     reviews['approved_artifacts'] = [a for a in reviews['approved_artifacts'] if a['id'] not in {j['id'] for j in jobs}] + approvals
     existing = next((r for r in reviews['reviews'] if r['id'] == d['id']), None)
-    aliases = list(dict.fromkeys((existing or {}).get('resource_aliases', []) + [j['id'] for j in jobs]))
+    lock_path = root / 'configs/research_resources.lock.json'
+    release = {f['url'] for f in resolution.get('files', [])} | {f"datasets/{f.get('folder') or resolution.get('folder')}/{f['path']}" for f in resolution.get('files', [])}
+    held_ids = [f['id'] for f in (read(lock_path)['files'] if lock_path.exists() else []) if f.get('url') in release or f['path'] in release]  # release files already held, possibly under another entry's jobs
+    aliases = list(dict.fromkeys((existing or {}).get('resource_aliases', []) + held_ids + [j['id'] for j in jobs]))
     selection = 'All files (complete provider release)' if plan['complete_release_registrable'] else (
         f"Registrable part of the release: {plan['unbound_files']} files have no covering licence record" + (f"; {plan['unacknowledged_files']} files need a technical-risk acknowledgement" if plan['unacknowledged_files'] else '') + (f"; {len(plan['unsupported_urls'])} source URLs are unsupported" if plan['unsupported_urls'] else '') + '.')
     entry = {**(existing or {}), 'id': d['id'], 'name': d['name'], 'source': (d.get('source_urls') or [''])[0], 'priority': d.get('priority'),
@@ -647,7 +675,7 @@ def register(root, d, resolution, plan, evidence_items, licence_evidence, run_na
              'remaining_checks': ['Verify provider identities on transfer', 'Inspect structure after transfer'], 'resource_aliases': aliases, 'metadata_evidence': evidence_items + licence_evidence,
              'access_and_AI': 'Bound licence records: ' + (', '.join(plan['bindings']) or 'none') + (f"; {plan['rights_unresolved_files']} files acquired rights-unresolved under the explicit option (no licence record, AI use blocked)" if plan.get('rights_unresolved_files') else '') + '; the saved mode applies; downloading grants no AI use.',
              'full_release': {'manifest': resolution['manifest'], 'release': resolution['release'], 'files': plan['release_files'], 'previously_held': plan['held'], 'jobs_added': len(jobs),
-                              'unbound_files': plan['unbound_files'], 'unacknowledged_files': plan['unacknowledged_files'], 'rights_unresolved_files': plan.get('rights_unresolved_files', 0), 'unknown_size_files': plan.get('unknown_size_files', 0), 'unsupported_sources': plan['unsupported_urls'], 'complete': plan['complete_release_registrable'],
+                              'unbound_files': plan['unbound_files'], 'unacknowledged_files': plan['unacknowledged_files'], 'rights_unresolved_files': plan.get('rights_unresolved_files', 0), 'unknown_size_files': plan.get('unknown_size_files', 0), 'unsupported_sources': plan['unsupported_urls'], 'unresolved_sources': plan.get('unresolved_sources', []), 'not_held_elsewhere_files': plan.get('not_held_elsewhere_files', 0), 'complete': plan['complete_release_registrable'],
                               'requested': date.today().isoformat(), 'resolver_run': run_name}}
     reviews['reviews'] = [r for r in reviews['reviews'] if r['id'] != d['id']] + [entry]
     reviews['reviewed_at'] = reviewed_at
@@ -656,10 +684,12 @@ def register(root, d, resolution, plan, evidence_items, licence_evidence, run_na
     seen = {(a['path'], a['sha256'], a['resource']) for a in assets['files']}
     assets['files'] += [a for a in new_assets if (a['path'], a['sha256'], a['resource']) not in seen]
     assets['as_of'] = date.today().isoformat()
-    write_json(root / 'configs/research_resources.json', manifest)
-    write_json(root / 'configs/resource_scope.json', scope)
+    if jobs:  # recording a release held under another entry's jobs registers nothing new: the job manifest the acquisition report is bound to stays untouched
+        write_json(root / 'configs/research_resources.json', manifest)
+        write_json(root / 'configs/resource_scope.json', scope)
     write_json(root / 'configs/dataset_download_reviews.json', reviews)
-    write_json(root / 'configs/data_license_assets.json', assets)
+    if new_assets:
+        write_json(root / 'configs/data_license_assets.json', assets)
     return {'jobs': len(jobs), 'approvals': len(approvals), 'assets': len(new_assets)}
 
 
@@ -677,14 +707,14 @@ def confirm_complete(root, completed, run_name):
         plan = completed.get(entry['id'])
         if plan is not None:
             entry['full_release'] = {**entry.get('full_release', {}), 'files': plan['release_files'], 'previously_held': plan['held'], 'jobs_added': 0, 'withdrawn_unheld_jobs': 0, 'unbound_files': plan.get('unbound_files', 0),
-                                     'unacknowledged_files': plan.get('unacknowledged_files', 0), 'unsupported_sources': plan.get('unsupported_urls', []), 'complete': True,
+                                     'unacknowledged_files': plan.get('unacknowledged_files', 0), 'unsupported_sources': plan.get('unsupported_urls', []), 'unresolved_sources': [], 'not_held_elsewhere_files': 0, 'complete': True,
                                      'confirmed_complete': date.today().isoformat(), 'resolver_run': run_name}
             entry['minimal_selection'] = 'All files (complete provider release)'
     write_json(path, reviews)
 
 
 # -------------------------------------------------------------------------------------------------- execution
-def execute(root, ready, spec, mode, study_id, run_dir, journal, workers=4, reuse=None):
+def execute(root, ready, spec, mode, study_id, run_dir, journal, workers=4, reuse=None, reuse_only=False):
     """Acquire registered jobs: identity-backed files into the locked holdings, acknowledged-risk files into quarantine.
 
     `workers` transfers run at a time per dataset; the calling thread settles each finished transfer (lock, report,
@@ -710,8 +740,8 @@ def execute(root, ready, spec, mode, study_id, run_dir, journal, workers=4, reus
         allow = job.get('rights_unresolved') is True
         try:
             if job['technical_risks'] and not direct:
-                return d_id, job, 'quarantined', acquisition.acquire(item, {}, base=stage, execute=True, journal=journal, license_context=license_context, allow_unresolved_rights=allow, reuse=reuse)
-            return d_id, job, 'acquired', acquisition.acquire(item, locked, base=base, execute=True, journal=journal, license_context=license_context, allow_unresolved_rights=allow, reuse=reuse)
+                return d_id, job, 'quarantined', acquisition.acquire(item, {}, base=stage, execute=True, journal=journal, license_context=license_context, allow_unresolved_rights=allow, reuse=reuse, reuse_only=reuse_only)
+            return d_id, job, 'acquired', acquisition.acquire(item, locked, base=base, execute=True, journal=journal, license_context=license_context, allow_unresolved_rights=allow, reuse=reuse, reuse_only=reuse_only)
         except Exception as error:
             return d_id, job, 'failed', error
 
@@ -777,7 +807,7 @@ def reuse_workspaces(root, names):
     return found
 
 
-def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, workers=4, only=None, reuse_from=None, import_from=None):
+def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, workers=4, only=None, reuse_from=None, import_from=None, reuse_only=False):
     root = Path(root).resolve()
     spec = agent.read_instructions(instructions_path)
     receipt = read(root / 'data/interim/dataset_selection/latest.json')
@@ -815,13 +845,15 @@ def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, w
     if only and set(only) - set(spec['dataset_ids']):
         raise ValueError('datasets_not_in_instructions: ' + ', '.join(sorted(set(only) - set(spec['dataset_ids']))))
     selected = [i for i in spec['dataset_ids'] if not only or i in only]  # a restricted run re-plans only these; the others keep their reservations against the total
-    if reuse_from is None and spec.get('reuse_held_files') is True:  # the saved option: every other study workspace of this checkout that holds verified files
+    if reuse_from is None and (spec.get('reuse_held_files') is True or reuse_only):  # the saved option: every other study workspace of this checkout that holds verified files
         reuse_from = [str(p) for p in acquisition.workspaces_with_holdings_near(root)]
     reuse_paths = reuse_workspaces(root, reuse_from)
     reuse = acquisition.holdings_of(reuse_paths) if reuse_paths else None
+    if reuse_only and not reuse:
+        raise ValueError('reuse_only_needs_another_study_that_holds_files')
     imports = import_folders(root, spec, import_from)  # releases the user obtained themselves: their folders stand in for the provider
     import_sources = {}
-    journal('run_started', {'dataset_ids': spec['dataset_ids'], 'only': sorted(only) if only else None, 'reuse_from': [p.name for p in reuse_paths], 'import_from': {i: str(f) for i, f in imports.items()}, 'reuse_held_files': spec.get('reuse_held_files') is True, 'license_mode': spec['license_mode'], 'study_id': study_id, 'register': register_jobs, 'execute': execute_jobs})
+    journal('run_started', {'reuse_only': reuse_only, 'dataset_ids': spec['dataset_ids'], 'only': sorted(only) if only else None, 'reuse_from': [p.name for p in reuse_paths], 'import_from': {i: str(f) for i, f in imports.items()}, 'reuse_held_files': spec.get('reuse_held_files') is True, 'license_mode': spec['license_mode'], 'study_id': study_id, 'register': register_jobs, 'execute': execute_jobs})
     held_bytes, reserved = committed_bytes(root, spec['dataset_ids'])
     outcomes, ready, completed, total_budget = [], {}, {}, held_bytes + sum(reserved.values())
     for dataset_id in selected:
@@ -846,6 +878,8 @@ def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, w
                 path.write_bytes(body)
             evidence_items.append({'path': str(path.relative_to(root)), 'sha256': digest(path), 'url': url, 'retrieved_at': now()})
         plan = plan_dataset(d, resolution, spec, registry, manifest_paths, held, acknowledgements)
+        if reuse_only and plan['outcome'] in {'ready', 'ready_partial'}:
+            plan = copy_only(plan, reuse)  # copy what other studies hold; the provider is never asked for bytes
         withdrawn = []
         if plan['outcome'] in {'ready', 'ready_partial'}:
             total_budget -= reserved.pop(dataset_id, 0)  # this run re-plans the dataset's unheld files; its package replaces the reservation
@@ -855,7 +889,7 @@ def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, w
                     withdrawn = withdraw_unheld_jobs(root, dataset_id)  # a size-blocked release holds no reservation; its held files stay
                     manifest_paths = {p: i for p, i in manifest_paths.items() if i not in set(withdrawn)}
         outcome = {'dataset': dataset_id, 'release': resolution.get('release'), 'manifest': resolution.get('manifest'), 'components': resolution.get('components'),
-                   'unsupported_urls': plan.get('unsupported_urls', []), 'licence_label_from_provider': resolution.get('licence_label'), 'outcome': plan['outcome'], 'blockers': plan.get('blockers', []),
+                   'unsupported_urls': plan.get('unsupported_urls', []), 'unresolved_sources': plan.get('unresolved_sources', []), 'not_held_elsewhere_files': plan.get('not_held_elsewhere_files', 0), 'licence_label_from_provider': resolution.get('licence_label'), 'outcome': plan['outcome'], 'blockers': plan.get('blockers', []),
                    'release_files': plan.get('release_files'), 'previously_held': plan.get('held'), 'new_jobs': len(plan['jobs']), 'unbound_files': plan.get('unbound_files', 0), 'unacknowledged_files': plan.get('unacknowledged_files', 0), 'rights_unresolved_files': plan.get('rights_unresolved_files', 0), 'unknown_size_files': plan.get('unknown_size_files', 0),
                    'unbound_sample': plan.get('unbound_sample', []), 'package_budget_bytes': plan.get('package_budget'), 'selection_committed_bytes_before': total_budget, 'withdrawn_jobs': withdrawn, 'expected_bytes': sum(j.get('expected_bytes', 0) for j in plan['jobs']),
                    'technical_risks': plan.get('risks'), 'unaccepted_risks': plan.get('unaccepted'), 'license_bindings': plan.get('bindings'), 'complete_release_registrable': plan.get('complete_release_registrable'),
@@ -867,15 +901,20 @@ def run(instructions_path, root=ROOT, register_jobs=False, execute_jobs=False, w
                 outcome['registered'] = register(root, d, resolution, plan, [{'path': e['path'], 'sha256': e['sha256']} for e in evidence_items], licence_evidence, run_name)
                 manifest_paths.update({j['path']: j['id'] for j in plan['jobs']})
                 ready[dataset_id] = plan
-        elif plan['outcome'] == 'already_complete' and register_jobs:
-            completed[dataset_id] = plan
+        elif register_jobs and plan['outcome'] in {'already_complete', 'held_part_complete_rest_unbound_or_unsupported'}:
+            if plan.get('held') and not any(r['id'] == dataset_id for r in read(root / 'configs/dataset_download_reviews.json')['reviews']):
+                # every file it needs is held under another catalogue entry's jobs (one release, two entries): record that this dataset holds them
+                licence_evidence = [{'path': e['snapshot'], 'sha256': e['sha256']} for b in plan['bindings'] for e in registry.resources[b].get('evidence', [])]
+                outcome['registered'] = register(root, d, resolution, plan, [{'path': e['path'], 'sha256': e['sha256']} for e in evidence_items], licence_evidence, run_name)
+            if plan['outcome'] == 'already_complete':
+                completed[dataset_id] = plan
         outcomes.append(outcome)
         journal('dataset_resolved', {k: v for k, v in outcome.items() if k not in {'evidence', 'components'}})
     confirm_complete(root, completed, run_name)
     if completed:
         refresh_dataset_entries(root, set(completed))
     sources = {**(reuse or {}), **import_sources} if reuse is not None or import_sources else None  # bytes to copy instead of downloading: other studies' holdings and the user's folders
-    executed = execute(root, ready, spec, spec['license_mode'], study_id, run_dir, journal, workers, sources) if execute_jobs and ready else None
+    executed = execute(root, ready, spec, spec['license_mode'], study_id, run_dir, journal, workers, sources, reuse_only) if execute_jobs and ready else None
     if register_jobs:
         refresh_dataset_entries(root, set(selected))  # every dataset this run looked at, including size-blocked ones with withdrawn jobs or a stopped earlier run, gets its registry entry in line with the lock
     report = {'schema_version': 1, 'kind': 'datahunter_full_release_resolution', 'created_at': now(), 'run': str(run_dir.relative_to(root)), 'study_id': study_id, 'license_mode': spec['license_mode'], 'only': sorted(only) if only else None,
@@ -901,6 +940,7 @@ def main(argv=None):
     parser.add_argument('--execute', action='store_true', help='Also transfer the registered jobs (implies --register)')
     parser.add_argument('--workers', type=int, default=4, choices=range(1, 9), help='Concurrent transfers per dataset (default 4, as in acquire_research_resources.py)')
     parser.add_argument('--datasets', nargs='+', metavar='ID', help='Only these datasets of the saved instructions (a retry after a provider outage); the others keep their reservations against the total cap')
+    parser.add_argument('--reuse-only', action='store_true', help='Copy only the files other study workspaces hold (all of them unless --reuse-from-study names some) and download nothing; the rest of each release stays unregistered and the dataset partial')
     parser.add_argument('--reuse-from-study', nargs='+', metavar='STUDY', help='Copy files another study workspace already holds and verified (study id under studies/ or a workspace path) instead of downloading them; identity checks and this study’s permission gates still apply')
     parser.add_argument('--import-from', nargs='+', metavar='ID=FOLDER', help='A release you obtained yourself (after credentialing, an agreement or from a provider without an automated route): the folder stands in for the provider manifest; keep the provider’s SHA256SUMS or MD5SUMS file in it so the copy is verified against the provider’s hashes; the same approval, size and licence gates apply')
     args = parser.parse_args(argv)
@@ -910,7 +950,7 @@ def main(argv=None):
             parser.error('--import-from takes ID=FOLDER')
         dataset_id, folder = item.split('=', 1)
         imports[dataset_id] = folder
-    return run(args.instructions, register_jobs=args.register or args.execute, execute_jobs=args.execute, workers=args.workers, only=args.datasets, reuse_from=args.reuse_from_study, import_from=imports or None)
+    return run(args.instructions, register_jobs=args.register or args.execute, execute_jobs=args.execute, workers=args.workers, only=args.datasets, reuse_from=args.reuse_from_study, import_from=imports or None, reuse_only=args.reuse_only)
 
 
 if __name__ == '__main__':

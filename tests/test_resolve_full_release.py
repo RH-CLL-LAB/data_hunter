@@ -181,6 +181,14 @@ class GateTests(WorkspaceFixture):
         write(self.root / 'configs/data_licenses.json', {'schema_version': 1, 'default': 'lenient', 'resources': [{**self.licence, 'scope': 'software_only'}]})
         plan = module.plan_dataset(code, resolved, self.spec, self.registry(), set(), set(), set())
         self.assertEqual((plan['outcome'], plan['jobs'][0]['kind'], plan['bindings']), ('ready', 'repository_source', []))
+        near = {**resolved, 'files': resolved['files'] + [{'path': 'source/examples/data/corpus.csv', 'url': 'https://raw.githubusercontent.com/o/r/f/examples/data/corpus.csv', 'bytes': 5067982, 'format': 'csv', 'git_blob_sha1': '2' * 40}]}
+        plan = module.plan_dataset(code, near, self.spec, self.registry(), set(), set(), set())
+        self.assertEqual((plan['outcome'], plan['unbound_sample']), ('ready_partial', ['datasets/o_r_v1/source/examples/data/corpus.csv']),
+                         'a file whose transfer cap exceeds the reference limit is data: it needs a licence binding like any other')
+        plan = module.plan_dataset(code, near, {**self.spec, 'acquire_unresolved_rights': True}, self.registry(), set(), set(), set())
+        self.assertEqual([(j['kind'], j.get('rights_unresolved', False)) for j in plan['jobs']], [('repository_source', False), ('dataset', True)], 'the unresolved-rights option covers it')
+        self.assertTrue(all(j['max_bytes'] <= module.REFERENCE_LIMIT for j in plan['jobs'] if j['kind'] == 'repository_source'),
+                        'a reference job always fits the limit the acquisition gate checks, so it never meets a licence gate it was not planned for')
 
     def test_coverage_limits_bind_only_listed_urls_and_the_release_is_labelled_partial(self):
         resolved = self.resolution()
@@ -215,6 +223,21 @@ class GateTests(WorkspaceFixture):
         twins = {**resolution, 'files': [{**resolution['files'][0], 'path': 'a-b.csv', 'url': 'https://zenodo.org/u1'}, {**resolution['files'][0], 'path': 'a_b.csv', 'url': 'https://zenodo.org/u2'}]}
         plan = module.plan_dataset(self.dataset, twins, self.spec, self.registry(), set(), set(), set())
         self.assertEqual(len({j['id'] for j in plan['jobs']}), 2, 'paths that slug alike get distinct, deterministic ids')
+
+    def test_a_source_that_fails_to_resolve_keeps_the_release_partial_even_when_the_rest_is_held(self):
+        limited = {'blocked': 'github_api_rate_limited_retry_after_2026-01-01T00:00:00+00:00', 'release': 'GitHub o/r'}
+        with patch.object(module, 'fetch', self.web.fetch), patch.dict(module.RESOLVERS, {'github': lambda target, evidence: limited}):
+            resolution = module.resolve_all(*module.detect_all(['https://zenodo.org/records/1', 'https://github.com/o/r']), [])
+        self.assertEqual(resolution['unresolved_sources'], [{'source': 'https://github.com/o/r', 'reason': limited['blocked']}])
+        plan = module.plan_dataset(self.dataset, resolution, self.spec, self.registry(), set(), set(), set())
+        self.assertEqual((plan['outcome'], plan['complete_release_registrable'], plan['unresolved_sources']), ('ready_partial', False, resolution['unresolved_sources']),
+                         'the files of the sources that answered are not the complete release')
+        held = {('url', f['url']) for f in resolution['files']}
+        plan = module.plan_dataset(self.dataset, resolution, self.spec, self.registry(), set(), held, set())
+        self.assertEqual(plan['outcome'], 'held_part_complete_rest_unbound_or_unsupported', 'never confirmed complete while a source did not answer')
+        module.register(self.root, self.dataset, resolution, module.plan_dataset(self.dataset, resolution, self.spec, self.registry(), set(), set(), set()), [], [], 'run')
+        entry = json.loads((self.root / 'configs/dataset_download_reviews.json').read_text())['reviews'][0]
+        self.assertEqual((entry['full_release']['complete'], entry['full_release']['unresolved_sources']), (False, resolution['unresolved_sources']))
 
 
 class RunTests(WorkspaceFixture):
@@ -337,6 +360,24 @@ class RunTests(WorkspaceFixture):
         usage = json.loads((self.root / 'configs/dataset_study_usage.json').read_text())['datasets'][0]
         self.assertEqual(usage['completeness'], 'complete_public_release', 'the registry label follows the confirmed complete resolution')
 
+    def test_a_release_held_under_another_entry_is_recorded_for_this_dataset_too(self):
+        record = {'metadata': {'access_right': 'open'}, 'files': [{'key': 'data.zip', 'size': 1000, 'checksum': 'md5:' + 'c' * 32}]}
+        self.web = FakeWeb({'https://zenodo.org/api/records/1': (200, json.dumps(record).encode())})
+        write(self.instructions, self.spec)
+        write(self.root / 'configs/dataset_study_usage.json', {'datasets': [{'id': self.dataset['id'], 'name': 'Zenodo set', 'source_urls': ['https://zenodo.org/records/1'], 'paths': [], 'completeness': 'not_obtained', 'missing_components': [], 'next_action': ''}]})
+        held = self.root / 'data/acquisitions/datasets/sibling_entry/data.zip'; held.parent.mkdir(parents=True); held.write_bytes(b'x' * 1000)
+        write(self.root / 'configs/research_resources.lock.json', {'files': [{'id': 'sibling_data_zip', 'path': 'datasets/sibling_entry/data.zip', 'url': 'https://zenodo.org/api/records/1/files/data.zip/content',
+                                                                            'bytes': 1000, 'sha256': hashlib.sha256(b'x' * 1000).hexdigest()}]})
+        manifest_before = (self.root / 'configs/research_resources.json').read_bytes()
+        with patch.object(module, 'fetch', self.web.fetch):
+            report = module.run(self.instructions, root=self.root, register_jobs=True)
+        self.assertEqual((report['counts'], report['outcomes'][0]['new_jobs']), ({'already_complete': 1}, 0))
+        self.assertEqual((self.root / 'configs/research_resources.json').read_bytes(), manifest_before, 'nothing new registered: the acquisition report stays current')
+        entry = next(r for r in json.loads((self.root / 'configs/dataset_download_reviews.json').read_text())['reviews'] if r['id'] == self.dataset['id'])
+        self.assertEqual((entry['resource_aliases'], entry['full_release']['complete']), (['sibling_data_zip'], True), 'the dataset owns the release files another entry acquired')
+        usage = json.loads((self.root / 'configs/dataset_study_usage.json').read_text())['datasets'][0]
+        self.assertEqual((usage['completeness'], usage['paths']), ('complete_public_release', ['data/acquisitions/datasets/sibling_entry/']))
+
     def test_total_cap_counts_what_the_selection_already_holds_and_has_registered(self):
         write(self.instructions, self.spec)
 
@@ -420,6 +461,32 @@ class RunTests(WorkspaceFixture):
         self.assertEqual({k: (v or {}).get('study') for k, v in seen.items()}, {'zenodo_1_data_zip': 'other-study', 'zenodo_1_readme_md': None}, 'only the file the other study holds is offered for reuse')
         rows = [json.loads(l) for l in (self.root / report['run'] / 'operations.jsonl').read_text().splitlines()]
         self.assertEqual(rows[0]['details']['reuse_from'], ['other-study'])
+
+    def test_copy_only_run_transfers_just_what_other_studies_hold_and_leaves_the_release_partial(self):
+        write(self.instructions, self.spec)
+        with patch.object(module, 'fetch', self.web.fetch):
+            with self.assertRaisesRegex(ValueError, 'reuse_only_needs_another_study_that_holds_files'):
+                module.run(self.instructions, root=self.root, register_jobs=True, execute_jobs=True, reuse_only=True)
+        other = self.root / 'studies' / 'other-study'
+        (other / 'data/acquisitions/datasets/zenodo_1').mkdir(parents=True); (other / 'configs').mkdir()
+        (other / 'data/acquisitions/datasets/zenodo_1/data.zip').write_bytes(b'x' * 1000)
+        write(other / 'configs/research_resources.lock.json', {'files': [{'id': 'zenodo_1_data_zip', 'path': 'datasets/zenodo_1/data.zip', 'url': 'https://zenodo.org/api/records/1/files/data.zip/content', 'bytes': 1000, 'sha256': hashlib.sha256(b'x' * 1000).hexdigest()}]})
+        transferred = []
+
+        def fake_acquire(item, locked, base, execute, journal, license_context, **options):
+            transferred.append(item['id'])
+            path = base / item['path']; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'x' * item['expected_bytes'])
+            return {'id': item['id'], 'path': item['path'], 'url': item['url'], 'bytes': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                    'hash_authority': 'fixture', 'acquired_at': '2026-01-01T00:00:00+00:00', 'state': 'downloaded_verified', 'inspection': None, 'copied_from': {'study': 'other-study'}}
+        with patch.object(module, 'fetch', self.web.fetch), patch.object(module.acquisition, 'acquire', fake_acquire):
+            report = module.run(self.instructions, root=self.root, register_jobs=True, execute_jobs=True, reuse_from=[str(other)], reuse_only=True)
+        self.assertEqual(transferred, ['zenodo_1_data_zip'], 'the README no other study holds is never fetched from the provider')
+        outcome = report['outcomes'][0]
+        self.assertEqual((outcome['outcome'], outcome['new_jobs'], outcome['not_held_elsewhere_files']), ('ready_partial', 1, 1))
+        manifest = json.loads((self.root / 'configs/research_resources.json').read_text())['resources']
+        self.assertEqual([r['id'] for r in manifest if r['id'].startswith('zenodo_1')], ['zenodo_1_data_zip'], 'the unheld file stays unregistered')
+        entry = next(r for r in json.loads((self.root / 'configs/dataset_download_reviews.json').read_text())['reviews'] if r['id'] == self.dataset['id'])
+        self.assertEqual((entry['full_release']['complete'], entry['full_release']['not_held_elsewhere_files']), (False, 1))
 
     def test_saved_reuse_option_finds_the_other_study_workspaces_of_this_checkout(self):
         write(self.instructions, {**self.spec, 'reuse_held_files': True})

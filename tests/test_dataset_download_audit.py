@@ -14,6 +14,15 @@ spec.loader.exec_module(audit)
 
 
 class DatasetDownloadAuditTests(unittest.TestCase):
+    def test_a_locked_and_verified_job_counts_as_downloaded_without_a_row_in_the_acquisition_report(self):
+        job = {'id': 'a', 'acquisition': 'direct', 'url': 'https://x.example/a.csv', 'path': 'datasets/x/a.csv'}
+        held = {'id': 'a', 'state': 'verified', 'url': 'https://x.example/a.csv', 'path': 'data/acquisitions/datasets/x/a.csv'}
+        self.assertEqual(audit.lock_outcome(job, held)['state'], 'downloaded_verified')
+        self.assertEqual(audit.lock_outcome(job, None)['state'], 'not_yet_downloaded')
+        self.assertEqual(audit.lock_outcome(job, {**held, 'state': 'integrity_failure'})['state'], 'not_yet_downloaded', 'a file failing its hash is not counted as held')
+        self.assertEqual(audit.lock_outcome(job, {**held, 'url': 'https://x.example/other.csv'})['state'], 'not_yet_downloaded')
+        self.assertEqual(audit.lock_outcome({**job, 'acquisition': 'manual', 'reason': 'login'}, None), {'id': 'a', 'state': 'manual', 'reason': 'login'})
+
     def test_fresh_hash_detects_corruption(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'data.bin'

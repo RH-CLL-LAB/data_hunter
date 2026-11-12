@@ -107,7 +107,8 @@ Build the site, then serve it:
 ```
 
 Then open <http://127.0.0.1:8767/> and start with **Tutorial** in the
-navigation. With no study yet, the build uses a bootstrap workspace
+navigation: seventeen illustrated steps from a new study through search,
+licence review, downloads, the data structure report and merging studies. With no study yet, the build uses a bootstrap workspace
 (`studies/.bootstrap/`) so the tutorial and the New-study form are available.
 
 The server shows the **active study**. Registering a study makes it active;

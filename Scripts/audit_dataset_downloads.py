@@ -31,6 +31,15 @@ BASE = ROOT / 'data/acquisitions'
 OUTPUT = ROOT / 'data/interim/dataset_download_audit'
 
 
+
+def lock_outcome(job, held):
+    """A registered job's acquisition state from the verified lock: held under its own URL and path, or not yet downloaded."""
+    if job['acquisition'] != 'direct':
+        return {'id': job['id'], 'state': job['acquisition'], 'reason': job.get('reason', '')}
+    if held and held.get('state') == 'verified' and held['url'] == job['url'] and held['path'].endswith('/' + job['path']):
+        return {'id': job['id'], 'state': 'downloaded_verified'}
+    return {'id': job['id'], 'state': 'not_yet_downloaded'}
+
 def location_parts(path):
     """Display path of a held file: relative to the collection folder when inside it, else to the workspace."""
     path = Path(path); collection = COLLECTION.relative_to(ROOT)
@@ -291,6 +300,7 @@ def main():
     prepared = json.loads(prepared_manifest.read_text()) if prepared_manifest.exists() else {'files': []}
     changed_prepared = [r['path'] for r in prepared['files'] if digest(COLLECTION / 'prepared' / r['path']) != r['sha256']]
     results = {r['id']: r for r in receipt['results']}
+    current_locked = {r.get('id'): r for r in verified if r.get('lock') == 'configs/research_resources.lock.json'}
     if receipt_stale:
         journal_path=BASE/'operations.jsonl'
         if journal_path.exists():
@@ -300,19 +310,13 @@ def main():
                 event=json.loads(line)
                 if event.get('manifest_sha256')==current_hash and event['kind']=='acquisition_outcome':
                     results[event['details']['id']]=event['details']
-        current_locked = {r.get('id'): r for r in verified if r.get('lock') == 'configs/research_resources.lock.json'}
         for job in manifest['resources']:
-            held = current_locked.get(job['id'])
-            if job['acquisition'] != 'direct':
-                results[job['id']] = {'id':job['id'],'state':job['acquisition'],'reason':job['reason']}
-            elif held and held['url'] == job['url'] and held['path'].endswith('/'+job['path']):
-                results[job['id']] = {'id':job['id'],'state':'downloaded_verified'}
-            elif job['id'] not in results or results[job['id']]['state'] == 'downloaded_verified':
-                results[job['id']] = {'id':job['id'],'state':'not_yet_downloaded'}
-    for job in manifest['resources']:  # jobs registered after the last acquisition run have no outcome yet
+            outcome = lock_outcome(job, current_locked.get(job['id']))
+            if outcome['state'] != 'not_yet_downloaded' or job['id'] not in results or results[job['id']]['state'] == 'downloaded_verified':
+                results[job['id']] = outcome  # a held file is held; an earlier failure of an unheld job stays visible
+    for job in manifest['resources']:  # jobs with no row in the last acquisition report: acquired by an earlier run, copied, or registered since
         if job['id'] not in results:
-            results[job['id']] = ({'id': job['id'], 'state': job['acquisition'], 'reason': job.get('reason', '')} if job['acquisition'] != 'direct'
-                                  else {'id': job['id'], 'state': 'not_yet_downloaded'})
+            results[job['id']] = lock_outcome(job, current_locked.get(job['id']))
     receipt['counts'] = dict(Counter(r['state'] for r in results.values()))
     catalog = json.loads((ROOT / 'configs/public_resource_acquisition.json').read_text())['resources']
     rows = reconcile(catalog, manifest['resources'], results, verified)

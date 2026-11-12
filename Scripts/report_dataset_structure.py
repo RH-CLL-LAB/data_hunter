@@ -75,7 +75,9 @@ RANDOM_ACCESS_KINDS = {'json', 'xlsx', 'parquet', 'xpt'}  # read whole or by see
 TABLE_KINDS = {'table', 'text_table', 'arff', 'ndjson'} | RANDOM_ACCESS_KINDS
 BUDGET_REASONS = {'table_budget_for_dataset', 'archive_member_budget'}  # a profile cut by a budget depends on its context and is never reused
 DEFAULT_LIMITS = {'max_decompressed_bytes_per_file': 512 * 1024 * 1024, 'max_archive_members': 100000, 'max_member_bytes_to_parse': 16 * 1024 * 1024}
-DEFAULTS = {'max_rows': 200000, 'max_count_rows': 5000000, 'max_tables': 25000, 'distinct_cap': 50000, 'top_cap': 200, 'reservoir': 2000, 'label_levels': 20, 'rendered_tables': 60, 'rendered_columns': 60}
+DEFAULTS = {'max_rows': 200000, 'max_count_rows': 5000000, 'max_tables': 100000, 'distinct_cap': 50000, 'top_cap': 200, 'reservoir': 2000, 'label_levels': 50, 'rendered_tables': 60, 'rendered_columns': 60,
+            'rendered_labels': 20}
+PROFILE_OPTIONS = ('max_rows', 'max_count_rows', 'distinct_cap', 'top_cap', 'reservoir', 'label_levels')  # what a file's profile depends on; the table budget only cuts, and a cut is recorded
 csv.field_size_limit(16 * 1024 * 1024)
 
 
@@ -386,6 +388,8 @@ def profile_sqlite(path, options):
     connection = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
     try:
         names = [r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+        if len(names) > options['max_tables']:
+            tables.append({'state': 'skipped', 'reason': 'table_budget_for_dataset'})
         for name in names[:options['max_tables']]:
             quoted = '"' + name.replace('"', '""') + '"'
             info = connection.execute(f'PRAGMA table_info({quoted})').fetchall()
@@ -531,7 +535,7 @@ def xlsx_tables(source, options, limits, budget_tables):
         dates = xlsx_date_styles(book, limits)
         for sheet in ET.parse(xlsx_part(book, 'xl/workbook.xml', limits)).getroot().iter(XLSX_MAIN + 'sheet'):
             if len(tables) >= budget_tables:
-                break
+                return tables, 'table_budget_for_dataset'
             target = targets.get(sheet.get(XLSX_REL + 'id'), '')
             part = target.lstrip('/') if target.startswith('/') else posixpath.normpath('xl/' + target)
             if part not in names:
@@ -920,7 +924,7 @@ def profile_named(kind, open_binary, name, size, options, limits, budget_tables)
             return [], None, 'transport_file_over_parse_budget'
         with open_binary() as binary:
             tables, reason = xpt_tables(binary.read(), options)
-        return tables[:budget_tables], None, reason
+        return tables[:budget_tables], None, ('table_budget_for_dataset' if len(tables) > budget_tables else reason)
     else:
         raise ValueError('not_a_table_kind: ' + kind)
     return ([result], None, None) if result['state'] == 'profiled' else ([], None, result['reason'])
@@ -999,7 +1003,9 @@ def profile_artifact(root, artifact, options, limits, budget_tables):
                 if target is None:
                     record['skipped'].append({'reason': 'decompression_budget'})
                 else:
-                    record['tables'] = profile_sqlite(target, {**options, 'max_tables': budget_tables})
+                    found = profile_sqlite(target, {**options, 'max_tables': budget_tables})
+                    record['tables'] = [t for t in found if t['state'] == 'profiled']
+                    record['skipped'] += [{'reason': t['reason']} for t in found if t['state'] == 'skipped']
             finally:
                 if temporary is not None:
                     temporary.unlink(missing_ok=True)
@@ -1018,39 +1024,49 @@ def profile_artifact(root, artifact, options, limits, budget_tables):
 DISK_STATE_REASONS = {'file_missing_on_disk', 'size_differs_from_receipt'}
 
 
+PROFILE_CODE_END = '# ======== Rendering.'
+
+
 def code_identity():
-    return digest(Path(__file__))
+    """The identity of the profiling code: everything in this file above the rendering marker. A change there invalidates every
+    reused profile; a change to how the page is written does not."""
+    text = Path(__file__).read_text()
+    return sha256(text[:text.index(PROFILE_CODE_END)].encode()).hexdigest()
 
 
 def census_records(root):
-    """The latest census record of this study and of the study workspaces beside it (read-only); this study's first."""
+    """The latest census record of this study and of the study workspaces beside it (read-only), one at a time; this study's first."""
     neighbours = sorted(p for p in root.parent.iterdir() if p.is_dir() and p.resolve() != root and (p / 'study.json').is_file()) if root.parent.is_dir() else []
-    records = []
     for folder in [root] + neighbours:
         try:
             pointer = read(folder / 'data/interim/dataset_structure/latest.json')
-            records.append((folder, read(folder / pointer['structure'])))
+            record = read(folder / pointer['structure'])
         except (OSError, ValueError, KeyError):
             continue
-    return records
+        yield folder, record
 
 
-def previous_profiles(root, options, limits):
+def previous_profiles(root, options, limits, wanted=None):
     """Artifact profiles of earlier censuses, this study's and its neighbours', keyed by hash and file name.
 
-    A profile is a function of the bytes, the file name, the options, the limits and this code, so one computed by another
-    study for the same bytes is the same profile: a merged or reusing study need not profile copied files again.
+    A profile is a function of the bytes, the file name, the profile options, the limits and this code, so one computed by
+    another study for the same bytes is the same profile: a merged or reusing study need not profile copied files again.
+    Profiles cut by a budget are left out. With `wanted` (keys of this study's files) only those are kept, so the records
+    of large neighbouring studies are read one at a time and not held in memory.
     """
     profiles = {}
+    current = {k: options.get(k) for k in PROFILE_OPTIONS}
     for folder, record in census_records(root):
-        if record.get('code_sha256') != code_identity() or record.get('options') != options or record.get('limits') != limits:
+        if record.get('code_sha256') != code_identity() or {k: (record.get('options') or {}).get(k) for k in PROFILE_OPTIONS} != current or record.get('limits') != limits:
             continue
         for d in record.get('datasets', []):
             if not d.get('profiled'):
                 continue
             for a in d.get('artifacts', []):
-                if a.get('sha256') and not any(x.get('reason') in DISK_STATE_REASONS | BUDGET_REASONS for x in a.get('skipped', [])):
-                    profiles.setdefault((a['sha256'], a['path'].rsplit('/', 1)[-1]), (a, folder == root))
+                key = (a.get('sha256'), a['path'].rsplit('/', 1)[-1])
+                if a.get('sha256') and (wanted is None or key in wanted) and not any(x.get('reason') in DISK_STATE_REASONS | BUDGET_REASONS for x in a.get('skipped', [])):
+                    profiles.setdefault(key, (a, folder == root))
+        del record
     return profiles
 
 
@@ -1065,7 +1081,8 @@ def collect(root, options=None, only=None, reuse=True):
     lock_path = root / 'configs/research_resources.lock.json'
     lock_files = len(read(lock_path)['files']) if lock_path.exists() else 0
     licences = read(root / 'configs/data_licenses.json')['resources'] if (root / 'configs/data_licenses.json').exists() else []
-    reusable = previous_profiles(root, options, limits) if reuse else {}
+    wanted = {(a.get('sha256'), a['path'].rsplit('/', 1)[-1]) for d in catalogue['datasets'] for a in d.get('obtained_artifacts', []) if a.get('sha256')}
+    reusable = previous_profiles(root, options, limits, wanted) if reuse else {}
     datasets, cache, reused, reused_elsewhere = [], {}, 0, 0
     for d in catalogue['datasets']:
         artifacts = d.get('obtained_artifacts', [])
@@ -1111,6 +1128,9 @@ def collect(root, options=None, only=None, reuse=True):
             'options': options, 'limits': limits, 'reused_artifacts': reused, 'reused_from_other_studies': reused_elsewhere}
 
 
+# ======== Rendering. Nothing below this line changes a file profile; profile reuse hashes only the code above it. ========
+
+
 def column_row(column):
     kind = column['type'] if not column.get('declared_type') else f"{column['declared_type']} → {column['type']}"
     distinct = fmt_num(column['distinct']) if column['distinct'] is not None else (f"≥ {fmt_num(column['distinct_at_least'])}" if column.get('distinct_at_least') else '—')
@@ -1125,7 +1145,8 @@ def column_row(column):
     if column.get('time_range'):
         parts.append(f"{column['time_range'][0]} … {column['time_range'][1]}")
     if column.get('labels'):
-        parts.append('labels: ' + ', '.join(f"{cell(l['value'], 32)} ({fmt_num(l['count'])})" for l in column['labels'][:8]) + (' …' if len(column['labels']) > 8 else ''))
+        parts.append('labels: ' + ', '.join(f"{cell(l['value'], 32)} ({fmt_num(l['count'])})" for l in column['labels'][:DEFAULTS['rendered_labels']])
+                     + (f" … {fmt_num(len(column['labels']) - DEFAULTS['rendered_labels'])} more in the variable dictionary" if len(column['labels']) > DEFAULTS['rendered_labels'] else ''))
     elif column.get('text_length') and not column.get('key_like'):
         parts.append(f"text length {column['text_length'][0]}–{column['text_length'][1]}")
     values = fmt_num(column['values']) if column['values'] is not None else '—'
@@ -1230,19 +1251,31 @@ def merge_columns(column_lists, label_levels):
     return merged
 
 
+def folder_of(name):
+    """Where a table lives: its folder, or the archive and the folder inside it."""
+    if ' → ' in name:
+        outer, inner = name.split(' → ', 1)
+        return outer + ' → ' + (posixpath.dirname(inner) or '.')
+    return posixpath.dirname(name) or '.'
+
+
 def families_of(d, options, minimum=3):
-    """The dataset's tables as entries: tables with the same columns and format (per-patient files, yearly extracts) form one family
-    when there are at least `minimum`; the others stay single. Entries keep the order in which their first table appears."""
+    """The dataset's tables as entries, named relative to the release folder: tables with the same columns and format
+    (per-patient files, yearly extracts) form one family when there are at least `minimum`; the others stay single.
+    Entries keep the order in which their first table appears."""
+    base = dataset_base(d)
     groups = {}
     for a in d['artifacts']:
+        rel = posixpath.relpath(a['path'], base) if base else a['path']
         for t in a['tables']:
-            groups.setdefault((tuple(c['name'] for c in t['columns']), t['format']), []).append((table_name(a['path'], t), t))
+            groups.setdefault((tuple(c['name'] for c in t['columns']), t['format']), []).append((table_name(rel, t), t))
     entries = []
     for members in groups.values():
         if len(members) >= minimum and members[0][1]['columns']:
             tables = [t for _, t in members]
-            folders = Counter(posixpath.dirname(n.split(' → ')[0]) or '.' for n, _ in members)
-            entries.append({'family': True, 'names': [n for n, _ in members], 'folders': folders, 'format': tables[0]['format'],
+            folders = Counter(folder_of(n) for n, _ in members)
+            distinct = len({posixpath.basename(n.split(' → ')[-1]) for n, _ in members})
+            entries.append({'family': True, 'names': [n for n, _ in members], 'folders': folders, 'distinct_names': distinct, 'format': tables[0]['format'],
                             'rows': sum(t['rows'] for t in tables), 'rows_are_lower_bound': any(t.get('rows_are_lower_bound') for t in tables),
                             'columns': merge_columns([t['columns'] for t in tables], options['label_levels'])})
         else:
@@ -1281,11 +1314,13 @@ def composition(d, limit=25):
 
 def entry_heading(d, number, entry):
     if not entry['family']:
-        return f"#### {d['id']} · table {number} · `{cell(entry['names'][0], 140)}`", table_heading(entry['table'])
-    folders = ', '.join(f"`{cell(f, 50)}/` ({fmt_num(n)})" for f, n in entry['folders'].most_common(4)) + (' …' if len(entry['folders']) > 4 else '')
+        return f"#### {d['id']} · table {number} · `{cell(entry['names'][0], 160)}`", table_heading(entry['table'])
+    folders = ', '.join(('top level' if f == '.' else f"`{cell(f, 70)}`") + f" ({fmt_num(n)})" for f, n in entry['folders'].most_common(5)) + (' …' if len(entry['folders']) > 5 else '')
     rows = ('≥ ' if entry['rows_are_lower_bound'] else '') + fmt_num(entry['rows'])
+    copies = (f" · only {fmt_num(entry['distinct_names'])} distinct file names: the same files appear in several folders or archives, so the row total counts them more than once"
+              if entry['distinct_names'] < len(entry['names']) else '')
     return (f"#### {d['id']} · table {number} · {fmt_num(len(entry['names']))} tables with the same {fmt_num(len(entry['columns']))} columns",
-            f"{rows} rows in total × {len(entry['columns'])} columns · {entry['format']} · in {folders} · e.g. `{cell(entry['names'][0], 100)}` · "
+            f"{rows} rows in total × {len(entry['columns'])} columns · {entry['format']} · in {folders} · e.g. `{cell(entry['names'][0], 100)}`{copies} · "
             'statistics combined over the tables (distinct counts are the largest per table unless every value is listed)')
 
 
@@ -1320,7 +1355,9 @@ def render_dataset(d, options):
         out += ['No tabular file was found among the held files: the release is code, documentation, archives without tables or a format without a reader (see the composition above).', '']
         return out
     tables = sum(len(e['names']) for e in entries)
-    summary = f"{fmt_num(tables)} tables" + (f" in {fmt_num(len(entries))} entries (tables with the same columns combined)" if len(entries) < tables else '') + ', column by column'
+    base = dataset_base(d)
+    summary = (f"{fmt_num(tables)} tables" + (f" in {fmt_num(len(entries))} entries (tables with the same columns combined)" if len(entries) < tables else '')
+               + ', column by column' + (f'; paths are relative to `{cell(base, 100)}/`' if base else ''))
     out += ['<details>', f"<summary>{summary}</summary>", '']
     for number, entry in enumerate(entries[:options['rendered_tables']], 1):
         heading, line = entry_heading(d, number, entry)
@@ -1422,7 +1459,7 @@ def render(data):
     return '\n'.join(out)
 
 
-DICTIONARY_FIELDS = ['dataset_id', 'dataset_name', 'table', 'tables_with_these_columns', 'format', 'rows', 'column', 'label', 'declared_type', 'type', 'values', 'missing',
+DICTIONARY_FIELDS = ['dataset_id', 'dataset_name', 'dataset_folder', 'table', 'tables_with_these_columns', 'distinct_file_names', 'format', 'rows', 'column', 'label', 'declared_type', 'type', 'values', 'missing',
                      'missing_share', 'distinct', 'unique', 'min', 'median', 'mean', 'max', 'first_time', 'last_time', 'labels', 'text_length']
 
 
@@ -1441,15 +1478,18 @@ def write_dictionary(data, target):
         writer = csv.DictWriter(stream, DICTIONARY_FIELDS)
         writer.writeheader()
         for d in sorted((x for x in data['datasets'] if x['held_files'] and x['profiled']), key=lambda x: x['id']):
+            base = dataset_base(d)
             for entry in families_of(d, data['options']):
                 if entry['family']:
                     name, count, fmt, rows, columns = f"{entry['names'][0]} (and {len(entry['names']) - 1} more with the same columns)", len(entry['names']), entry['format'], entry['rows'], entry['columns']
+                    distinct = entry['distinct_names']
                 else:
                     t = entry['table']
-                    name, count, fmt, rows, columns = entry['names'][0], 1, t['format'], t['rows'], t['columns']
+                    name, count, fmt, rows, columns, distinct = entry['names'][0], 1, t['format'], t['rows'], t['columns'], 1
                 for c in columns:
                     numeric, present = c.get('numeric') or {}, c['values']
-                    writer.writerow({'dataset_id': d['id'], 'dataset_name': spreadsheet_safe(d['name']), 'table': spreadsheet_safe(name), 'tables_with_these_columns': count, 'format': fmt,
+                    writer.writerow({'dataset_id': d['id'], 'dataset_name': spreadsheet_safe(d['name']), 'dataset_folder': spreadsheet_safe(base), 'table': spreadsheet_safe(name),
+                                     'tables_with_these_columns': count, 'distinct_file_names': distinct, 'format': fmt,
                                      'rows': rows, 'column': spreadsheet_safe(c['name']), 'label': spreadsheet_safe(c.get('label')), 'declared_type': spreadsheet_safe(c.get('declared_type')),
                                      'type': c['type'], 'values': '' if present is None else present, 'missing': '' if c['missing'] is None else c['missing'],
                                      'missing_share': f"{c['missing'] / (present + c['missing']):.4f}" if present is not None and c['missing'] is not None and present + c['missing'] else '',

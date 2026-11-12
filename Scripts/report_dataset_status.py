@@ -342,12 +342,14 @@ def save_report(root, doc, title='Dataset status and next actions', stem='datase
     request_path.write_text(json.dumps(request, indent=2, ensure_ascii=False) + '\n')
     sys.path.insert(0, str(CODE_ROOT / 'Scripts'))
     from register_research_study import register
-    from datahunter.workspace import active_study_id, set_active
-    previous = active_study_id()
+    from datahunter import workspace
+    # The pointer file itself, not active_study_id(): a run targeted with DATA_HUNTER_STUDY must still leave the user's choice as it was.
+    previous = workspace.ACTIVE.read_text().strip() or None if workspace.ACTIVE.is_file() else None
     register(request_path, apply=True, root=root)
-    if previous and previous != study_id:
+    current = workspace.ACTIVE.read_text().strip() or None if workspace.ACTIVE.is_file() else None
+    if current != previous:  # registering a report is not a request to switch studies
         try:
-            set_active(previous)  # registering a report is not a request to switch studies
+            workspace.set_active(previous) if previous else workspace.clear_active()
         except ValueError:
             pass
     return target

@@ -129,6 +129,10 @@ class ResearchAcquisitionTests(unittest.TestCase):
             record = module.acquire(self.item, {}, self.root, execute=True, journal=lambda *args: events.append(args), reuse=reuse)
         self.assertEqual((record['state'], 'copied_from' in record), ('downloaded_verified', False), 'rejected bytes fall back to a download')
         self.assertIn('reuse_rejected', [ev[0] for ev in events])
+        (self.root / 'sample.txt').unlink()
+        with patch.object(module.subprocess, 'run', side_effect=AssertionError('a copy-only run never downloads')):
+            with self.assertRaisesRegex(ValueError, 'copy_only_run_has_no_verified_copy_to_reuse'):
+                module.acquire(self.item, {}, self.root, execute=True, journal=lambda *args: events.append(args), reuse=reuse, reuse_only=True)
 
     def test_json_label_is_a_caveat_not_a_refusal_once_the_provider_identity_verified(self):
         jsonc = b'{\n  // a comment\n  "a": 1\n}\n'
